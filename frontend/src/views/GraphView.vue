@@ -12,6 +12,7 @@ const chartEl = ref(null)
 let chart = null
 
 const course = ref('')
+const isFull = ref(false)
 const graph = ref({ nodes: [], links: [], source: '' })
 
 const drawerOpen = ref(false)
@@ -23,7 +24,10 @@ async function load() {
   loading.value = true
   try {
     const resp = await api.get('/api/graph/overview', {
-      params: { course: course.value || undefined, level: 'courses' },
+      params: { 
+        course: course.value || undefined, 
+        level: isFull.value ? 'full' : 'courses' 
+      },
     })
     graph.value = resp.data
     render()
@@ -77,15 +81,22 @@ async function exploreByNode(node) {
     })
     mergeGraph(resp.data)
     render()
-    if (isCourse) {
+    
+    selectedNode.value = node
+    
+    if (isKnowledgePoint) {
+      resourceItems.value = resp.data.items || []
+      drawerOpen.value = true
+    } else {
       drawerOpen.value = false
       resourceItems.value = []
-      selectedNode.value = node
-      return
+      
+      // 如果点击的是资源节点，直接跳转详情
+      if (nodeType === 'resource') {
+        const rid = node.id.split(':')[1]
+        if (rid) router.push(`/resources/${rid}`)
+      }
     }
-    resourceItems.value = resp.data.items || []
-    selectedNode.value = node
-    drawerOpen.value = true
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载失败')
   } finally {
@@ -106,7 +117,7 @@ function render() {
     name: n.label || n.id,
     value: n.type,
     category: n.type,
-    symbolSize: n.type === 'resource' ? 18 : n.type === 'knowledge_point' ? 26 : 30,
+    symbolSize: n.type === 'resource' ? 18 : (n.type === 'knowledge_point' || n.type === 'department') ? 26 : 30,
   }))
   const links = (graph.value.links || []).map((e) => ({
     source: e.source,
@@ -153,7 +164,13 @@ watch(course, () => load())
     <template #header>
       <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
         <div style="font-weight: 600">知识图谱</div>
-        <el-input v-model="course" placeholder="课程过滤（可选）" style="width: 220px" clearable />
+        <el-input v-model="course" placeholder="课程过滤（可选）" style="width: 200px" clearable />
+        <el-switch
+          v-model="isFull"
+          active-text="展示全部"
+          inactive-text="基础视图"
+          @change="load"
+        />
         <el-tag type="info">{{ graph.source || 'unknown' }}</el-tag>
         <el-button :loading="loading" @click="load">刷新</el-button>
       </div>

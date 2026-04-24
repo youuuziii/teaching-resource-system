@@ -2,6 +2,17 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { 
+  Search, 
+  Refresh, 
+  Download, 
+  Star, 
+  StarFilled,
+  Reading,
+  User,
+  PriceTag,
+  Filter
+} from '@element-plus/icons-vue'
 import api from '../api/client'
 
 const router = useRouter()
@@ -93,24 +104,37 @@ async function fetchList() {
 
 async function download(item) {
   try {
-    const url = `${import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000'}/api/resources/${item.id}/download`
+    const token = localStorage.getItem('token')
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000'
+    const url = `${baseUrl}/api/resources/${item.id}/download?token=${token}`
     window.open(url, '_blank')
   } catch (e) {
     ElMessage.error('下载失败')
   }
 }
 
-async function favorite(item, action) {
+async function favorite(item) {
+  const action = item.is_favorited ? 'unfavorite' : 'favorite'
   try {
     await api.post(`/api/resources/${item.id}/favorite`, { action })
+    item.is_favorited = !item.is_favorited
     ElMessage.success(action === 'favorite' ? '已收藏' : '已取消收藏')
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '操作失败')
   }
 }
 
-function openDetail(row) {
-  router.push(`/resources/${row.id}`)
+function openDetail(item) {
+  router.push(`/resources/${item.id}`)
+}
+
+function resetQuery() {
+  query.keyword = ''
+  query.tag = ''
+  query.course_id = null
+  query.knowledge_point_id = null
+  query.teacher_id = null
+  fetchList()
 }
 
 watch(
@@ -118,14 +142,6 @@ watch(
   async (v) => {
     query.knowledge_point_id = null
     await fetchKnowledgePoints(v)
-    await fetchList()
-  },
-)
-
-watch(
-  () => isDean.value,
-  async (v) => {
-    if (!v) status.value = 'approved'
     await fetchList()
   },
 )
@@ -139,67 +155,235 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
-        <div style="font-weight: 600">资源列表</div>
-        <el-select v-model="status" style="width: 140px" :disabled="!isDean" @change="fetchList">
-          <el-option label="已通过" value="approved" />
-          <el-option v-if="isDean" label="待审核" value="pending" />
-          <el-option v-if="isDean" label="已拒绝" value="rejected" />
-        </el-select>
-        <el-input v-model="query.keyword" placeholder="关键词" style="width: 180px" clearable @change="fetchList" />
-        <el-input v-model="query.tag" placeholder="标签" style="width: 160px" clearable @change="fetchList" />
-        <el-select v-model="query.course_id" clearable placeholder="课程" style="width: 160px">
+  <div class="resource-container">
+    <!-- Filter Header -->
+    <el-card class="filter-card" shadow="never">
+      <div class="filter-grid">
+        <el-input 
+          v-model="query.keyword" 
+          placeholder="搜索资源标题/描述" 
+          :prefix-icon="Search"
+          clearable 
+          @change="fetchList"
+          class="filter-item"
+        />
+        
+        <el-select v-model="query.course_id" clearable placeholder="所属课程" class="filter-item">
+          <template #prefix><el-icon><Reading /></el-icon></template>
           <el-option v-for="c in courses" :key="c.id" :label="c.name" :value="c.id" />
         </el-select>
-        <el-select v-model="query.knowledge_point_id" clearable placeholder="知识点" style="width: 180px" @change="fetchList">
+
+        <el-select v-model="query.knowledge_point_id" clearable placeholder="关联知识点" class="filter-item" @change="fetchList">
           <el-option v-for="k in knowledgePoints" :key="k.id" :label="k.name" :value="k.id" />
         </el-select>
-        <el-select v-model="query.teacher_id" clearable placeholder="教师" style="width: 160px" @change="fetchList">
+
+        <el-select v-model="query.teacher_id" clearable placeholder="授课教师" class="filter-item" @change="fetchList">
+          <template #prefix><el-icon><User /></el-icon></template>
           <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
         </el-select>
-        <el-button :loading="loading" @click="fetchList">刷新</el-button>
-      </div>
-    </template>
 
-    <el-table :data="items" v-loading="loading" style="width: 100%">
-      <el-table-column label="标题" min-width="220">
-        <template #default="{ row }">
-          <el-link type="primary" @click="openDetail(row)">{{ row.title }}</el-link>
-        </template>
-      </el-table-column>
-      <el-table-column prop="course" label="课程" min-width="120">
-        <template #default="{ row }">
-          {{ row.course }}
-        </template>
-      </el-table-column>
-      <el-table-column prop="knowledge_point" label="知识点" min-width="140">
-        <template #default="{ row }">
-          {{ row.knowledge_point }}
-        </template>
-      </el-table-column>
-      <el-table-column label="教师" min-width="140">
-        <template #default="{ row }">
-          <span v-if="(row.teachers || []).length === 0">-</span>
-          <el-tag v-for="t in row.teachers || []" :key="t.id" style="margin-right: 6px" size="small">
-            {{ t.name }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="status" label="状态" width="110" />
-      <el-table-column label="标签" min-width="160">
-        <template #default="{ row }">
-          <el-tag v-for="t in row.tags || []" :key="t" style="margin-right: 6px" size="small">{{ t }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="200">
-        <template #default="{ row }">
-          <el-button size="small" @click="download(row)">下载</el-button>
-          <el-button v-if="canFavorite" size="small" type="primary" @click="favorite(row, 'favorite')">收藏</el-button>
-          <el-button v-if="canFavorite" size="small" @click="favorite(row, 'unfavorite')">取消</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-  </el-card>
+        <el-input 
+          v-model="query.tag" 
+          placeholder="标签筛选" 
+          :prefix-icon="PriceTag"
+          clearable 
+          @change="fetchList"
+          class="filter-item"
+        />
+
+        <div class="filter-actions">
+          <el-button type="primary" :icon="Search" @click="fetchList">搜索</el-button>
+          <el-button :icon="Refresh" @click="resetQuery">重置</el-button>
+        </div>
+      </div>
+
+      <div v-if="isDean" class="status-tabs">
+        <el-radio-group v-model="status" @change="fetchList">
+          <el-radio-button label="approved">已通过</el-radio-button>
+          <el-radio-button label="pending">待审核</el-radio-button>
+          <el-radio-button label="rejected">已拒绝</el-radio-button>
+        </el-radio-group>
+      </div>
+    </el-card>
+
+    <!-- Resource Grid -->
+    <div v-loading="loading" class="resource-grid">
+      <el-empty v-if="items.length === 0" description="暂无符合条件的资源" />
+      
+      <el-row :gutter="20">
+        <el-col v-for="item in items" :key="item.id" :xs="24" :sm="12" :md="8" :lg="6">
+          <el-card class="resource-item-card" shadow="hover">
+            <div class="resource-type-icon">
+              <el-icon :size="40" color="#409eff"><Notebook /></el-icon>
+            </div>
+            
+            <div class="resource-content">
+              <h3 class="resource-title" @click="openDetail(item)">{{ item.title }}</h3>
+              
+              <div class="resource-meta">
+                <div class="meta-item">
+                  <el-icon><Reading /></el-icon>
+                  <span>{{ item.course || '通用课程' }}</span>
+                </div>
+                <div class="meta-item">
+                  <el-icon><User /></el-icon>
+                  <span>{{ (item.teachers || []).map(t => t.name).join(', ') || '-' }}</span>
+                </div>
+              </div>
+
+              <div class="resource-tags">
+                <el-tag v-for="t in (item.tags || []).slice(0, 3)" :key="t" size="small" effect="plain">
+                  {{ t }}
+                </el-tag>
+              </div>
+
+              <div class="resource-footer">
+                <span class="date">{{ new Date(item.created_at).toLocaleDateString() }}</span>
+                <div class="actions">
+                  <el-tooltip content="收藏" placement="top">
+                    <el-button 
+                      v-if="canFavorite" 
+                      circle 
+                      size="small" 
+                      :type="item.is_favorited ? 'warning' : 'default'"
+                      @click="favorite(item)"
+                    >
+                      <el-icon><StarFilled v-if="item.is_favorited" /><Star v-else /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                  <el-tooltip content="下载" placement="top">
+                    <el-button circle size="small" :icon="Download" @click="download(item)" />
+                  </el-tooltip>
+                </div>
+              </div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.resource-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.filter-card {
+  border-radius: 12px;
+  background: #fff;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  align-items: center;
+}
+
+.filter-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.status-tabs {
+  margin-top: 20px;
+  border-top: 1px solid #f0f2f5;
+  padding-top: 16px;
+}
+
+.resource-grid {
+  min-height: 400px;
+}
+
+.resource-item-card {
+  border-radius: 12px;
+  margin-bottom: 20px;
+  transition: transform 0.3s;
+  overflow: hidden;
+}
+
+.resource-item-card:hover {
+  transform: translateY(-5px);
+}
+
+.resource-type-icon {
+  background: #f0f7ff;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: -20px -20px 20px;
+}
+
+.resource-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.resource-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  cursor: pointer;
+  transition: color 0.3s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-title:hover {
+  color: var(--primary-color);
+}
+
+.resource-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.meta-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #909399;
+}
+
+.resource-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  height: 24px;
+  overflow: hidden;
+}
+
+.resource-footer {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #f0f2f5;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.resource-footer .date {
+  font-size: 12px;
+  color: #c0c4cc;
+}
+
+.resource-footer .actions {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .filter-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

@@ -1,6 +1,18 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { 
+  Search, 
+  Plus, 
+  Refresh, 
+  Edit, 
+  Delete, 
+  User, 
+  Key, 
+  Lock,
+  Unlock,
+  Setting
+} from '@element-plus/icons-vue'
 import api from '../api/client'
 
 const tab = ref('users')
@@ -23,7 +35,7 @@ const isDean = computed(() => rolesOfMe.value.includes('dean') && !rolesOfMe.val
 
 const roleFilterOptions = computed(() => {
   const base = [
-    { label: '全部', value: 'all' },
+    { label: '全部角色', value: 'all' },
     { label: '教师', value: 'teacher' },
     { label: '学生', value: 'student' },
   ]
@@ -70,10 +82,10 @@ async function loadRbac() {
 }
 
 const createOpen = ref(false)
-const createForm = ref({ username: '', password: '', roles: ['teacher'], is_active: true })
+const createForm = ref({ username: '', password: '', roles: ['student'], is_active: true, class_name: '' })
 
 function openCreate() {
-  createForm.value = { username: '', password: '', roles: ['teacher'], is_active: true }
+  createForm.value = { username: '', password: '', roles: ['student'], is_active: true, class_name: '' }
   createOpen.value = true
 }
 
@@ -90,8 +102,9 @@ async function submitCreate() {
       password,
       roles: createForm.value.roles || [],
       is_active: !!createForm.value.is_active,
+      class_name: createForm.value.class_name || undefined,
     })
-    ElMessage.success('创建成功')
+    ElMessage.success('账号创建成功')
     createOpen.value = false
     await loadUsers()
   } catch (e) {
@@ -100,7 +113,7 @@ async function submitCreate() {
 }
 
 const editOpen = ref(false)
-const editForm = ref({ id: null, username: '', roles: [], is_active: true, password: '' })
+const editForm = ref({ id: null, username: '', roles: [], is_active: true, password: '', class_name: '' })
 
 function openEdit(row) {
   editForm.value = {
@@ -109,6 +122,7 @@ function openEdit(row) {
     roles: Array.isArray(row.roles) ? [...row.roles] : [],
     is_active: !!row.is_active,
     password: '',
+    class_name: row.class_name || '',
   }
   editOpen.value = true
 }
@@ -119,12 +133,13 @@ async function submitEdit() {
   const payload = {
     roles: editForm.value.roles || [],
     is_active: !!editForm.value.is_active,
+    class_name: editForm.value.class_name || '',
   }
   const pwd = (editForm.value.password || '').trim()
   if (pwd) payload.password = pwd
   try {
     await api.patch(`/api/admin/users/${id}`, payload)
-    ElMessage.success('保存成功')
+    ElMessage.success('账号修改成功')
     editOpen.value = false
     await loadUsers()
   } catch (e) {
@@ -134,13 +149,18 @@ async function submitEdit() {
 
 async function removeUser(row) {
   try {
-    await ElMessageBox.confirm(`确认删除账号「${row.username}」？`, '删除确认', { type: 'warning' })
+    await ElMessageBox.confirm(`确认删除账号「${row.username}」吗？此操作不可撤销。`, '删除确认', { 
+      type: 'warning',
+      confirmButtonText: '确定删除',
+      cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger'
+    })
   } catch {
     return
   }
   try {
     await api.delete(`/api/admin/users/${row.id}`)
-    ElMessage.success('删除成功')
+    ElMessage.success('账号已删除')
     await loadUsers()
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '删除失败')
@@ -165,7 +185,7 @@ async function submitRolePerms() {
   if (!id) return
   try {
     await api.put(`/api/admin/roles/${id}/permissions`, { permission_codes: roleEditForm.value.permission_codes || [] })
-    ElMessage.success('保存成功')
+    ElMessage.success('权限更新成功')
     roleEditOpen.value = false
     await loadRbac()
   } catch (e) {
@@ -198,134 +218,302 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
-        <div style="font-weight: 600">账号与权限管理</div>
-        <el-button :loading="usersLoading || rbacLoading" @click="() => Promise.all([isSystemAdmin ? loadRbac() : Promise.resolve(), loadUsers()])">刷新</el-button>
-      </div>
-    </template>
+  <div class="admin-users-container">
+    <el-card class="main-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <div class="title-section">
+            <el-icon><Setting /></el-icon>
+            <span>账号与权限中心</span>
+          </div>
+          <el-button 
+            :icon="Refresh" 
+            @click="() => Promise.all([isSystemAdmin ? loadRbac() : Promise.resolve(), loadUsers()])"
+            size="small"
+          >
+            同步数据
+          </el-button>
+        </div>
+      </template>
 
-    <el-tabs v-model="tab">
-      <el-tab-pane label="账号管理" name="users">
-        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px">
-          <el-select v-model="roleFilter" placeholder="角色筛选" style="width: 140px" @change="loadUsers">
-            <el-option v-for="opt in roleFilterOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+      <el-tabs v-model="tab" class="admin-tabs">
+        <!-- User Management -->
+        <el-tab-pane label="账号列表" name="users">
+          <div class="table-toolbar">
+            <div class="left-tools">
+              <el-select v-model="roleFilter" placeholder="角色筛选" style="width: 140px" @change="loadUsers">
+                <el-option v-for="opt in roleFilterOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+              </el-select>
+              <el-input 
+                v-model="userQuery" 
+                placeholder="搜索用户名" 
+                style="width: 240px" 
+                clearable 
+                :prefix-icon="Search"
+                @keyup.enter="loadUsers" 
+              />
+              <el-button type="primary" :icon="Search" @click="loadUsers">查询</el-button>
+            </div>
+            <el-button type="success" :icon="Plus" @click="openCreate">新增账号</el-button>
+          </div>
+
+          <el-table :data="users" v-loading="usersLoading" border stripe style="width: 100%" class="data-table">
+            <el-table-column prop="username" label="用户名" min-width="140">
+              <template #default="{ row }">
+                <div class="user-cell">
+                  <el-icon><User /></el-icon>
+                  <span>{{ row.username }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="所属角色" min-width="180">
+              <template #default="{ row }">
+                <div class="role-tags">
+                  <el-tag v-for="r in row.roles || []" :key="r" size="small" effect="plain">{{ r }}</el-tag>
+                  <span v-if="!(row.roles || []).length">-</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="班级信息" width="160">
+              <template #default="{ row }">
+                <el-tag v-if="row.class_name" type="info" size="small" round>{{ row.class_name }}</el-tag>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="账号状态" width="110" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.is_active ? 'success' : 'danger'" size="small">
+                  {{ row.is_active ? '启用中' : '已禁用' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="created_at" label="创建日期" width="180">
+              <template #default="{ row }">
+                {{ row.created_at ? new Date(row.created_at).toLocaleDateString() : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="管理操作" width="160" fixed="right" align="center">
+              <template #default="{ row }">
+                <el-button-group>
+                  <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
+                  <el-button size="small" type="danger" :icon="Delete" @click="removeUser(row)"></el-button>
+                </el-button-group>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <!-- RBAC Management -->
+        <el-tab-pane v-if="isSystemAdmin" label="角色与权限定义" name="rbac">
+          <div class="rbac-toolbar">
+            <el-input 
+              v-model="newPermCode" 
+              placeholder="请输入新的权限码（例如: resource.delete）" 
+              style="width: 360px" 
+              clearable 
+              :prefix-icon="Key"
+            />
+            <el-button type="primary" :icon="Plus" @click="createPermission">新增权限码</el-button>
+          </div>
+
+          <el-table :data="roles" v-loading="rbacLoading" border stripe style="width: 100%" class="data-table">
+            <el-table-column prop="name" label="角色名称" width="180">
+              <template #default="{ row }">
+                <div class="role-cell">
+                  <el-icon><Lock /></el-icon>
+                  <span>{{ row.name }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="关联权限码列表" min-width="400">
+              <template #default="{ row }">
+                <div class="perm-tags">
+                  <el-tag v-for="p in row.permissions || []" :key="p" size="small" type="warning" effect="plain">
+                    {{ p }}
+                  </el-tag>
+                  <span v-if="!(row.permissions || []).length" class="empty-text">未配置权限</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="管理" width="140" align="center">
+              <template #default="{ row }">
+                <el-button size="small" :icon="Edit" @click="openRoleEdit(row)">配置权限</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+    </el-card>
+
+    <!-- Create User Dialog -->
+    <el-dialog v-model="createOpen" title="新增账号" width="480px" destroy-on-close>
+      <el-form :model="createForm" label-position="top">
+        <el-form-item label="用户名" required>
+          <el-input v-model="createForm.username" placeholder="建议使用教工号/学号" :prefix-icon="User" />
+        </el-form-item>
+        <el-form-item label="初始密码" required>
+          <el-input v-model="createForm.password" placeholder="请输入初始密码" show-password :prefix-icon="Lock" />
+        </el-form-item>
+        <el-form-item label="分配角色" required>
+          <el-select v-model="createForm.roles" multiple filterable style="width: 100%" placeholder="可选择多个角色">
+            <el-option v-for="opt in allowedRoleOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
           </el-select>
-          <el-input v-model="userQuery" placeholder="按用户名搜索" style="width: 240px" clearable @keyup.enter="loadUsers" />
-          <el-button :loading="usersLoading" @click="loadUsers">搜索</el-button>
-          <el-button type="primary" @click="openCreate">新增账号</el-button>
-        </div>
+        </el-form-item>
+        <el-row :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="账号状态">
+              <el-switch v-model="createForm.is_active" active-text="启用" inactive-text="禁用" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" v-if="createForm.roles.includes('student')">
+            <el-form-item label="所属班级">
+              <el-input v-model="createForm.class_name" placeholder="如: 计科2101" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <template #footer>
+        <el-button @click="createOpen = false">取消</el-button>
+        <el-button type="primary" @click="submitCreate">确认创建</el-button>
+      </template>
+    </el-dialog>
 
-        <el-table :data="users" v-loading="usersLoading" style="width: 100%">
-          <el-table-column prop="username" label="用户名" min-width="160" />
-          <el-table-column label="角色" min-width="220">
-            <template #default="{ row }">
-              <el-tag v-for="r in row.roles || []" :key="r" style="margin-right: 6px" size="small">{{ r }}</el-tag>
-              <span v-if="(row.roles || []).length === 0">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="120">
-            <template #default="{ row }">
-              <el-tag :type="row.is_active ? 'success' : 'info'">{{ row.is_active ? '启用' : '禁用' }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="created_at" label="创建时间" min-width="200" />
-          <el-table-column label="操作" width="180">
-            <template #default="{ row }">
-              <el-button size="small" @click="openEdit(row)">编辑</el-button>
-              <el-button size="small" type="danger" @click="removeUser(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </el-tab-pane>
+    <!-- Edit User Dialog -->
+    <el-dialog v-model="editOpen" title="编辑账号信息" width="480px">
+      <el-form :model="editForm" label-position="top">
+        <el-form-item label="用户名">
+          <el-input v-model="editForm.username" disabled :prefix-icon="User" />
+        </el-form-item>
+        <el-form-item label="修改角色">
+          <el-select v-model="editForm.roles" multiple filterable style="width: 100%">
+            <el-option v-for="opt in allowedRoleOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="账号状态">
+              <el-switch v-model="editForm.is_active" active-text="启用" inactive-text="禁用" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" v-if="editForm.roles.includes('student')">
+            <el-form-item label="班级信息">
+              <el-input v-model="editForm.class_name" placeholder="如: 计科2101" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="重置密码">
+          <el-input v-model="editForm.password" placeholder="不修改请留空" show-password :prefix-icon="Lock" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editOpen = false">取消</el-button>
+        <el-button type="primary" @click="submitEdit">保存更改</el-button>
+      </template>
+    </el-dialog>
 
-      <el-tab-pane v-if="isSystemAdmin" label="角色权限" name="rbac">
-        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px">
-          <el-input v-model="newPermCode" placeholder="新增权限码（如 admin.users.manage）" style="width: 320px" clearable />
-          <el-button :loading="rbacLoading" type="primary" @click="createPermission">新增权限码</el-button>
-        </div>
-
-        <el-table :data="roles" v-loading="rbacLoading" style="width: 100%">
-          <el-table-column prop="name" label="角色" width="160" />
-          <el-table-column label="权限码" min-width="420">
-            <template #default="{ row }">
-              <el-tag v-for="p in row.permissions || []" :key="p" style="margin-right: 6px; margin-bottom: 6px" size="small">
-                {{ p }}
-              </el-tag>
-              <span v-if="(row.permissions || []).length === 0">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="140">
-            <template #default="{ row }">
-              <el-button size="small" @click="openRoleEdit(row)">编辑权限</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </el-tab-pane>
-    </el-tabs>
-  </el-card>
-
-  <el-dialog v-model="createOpen" title="新增账号" width="520px">
-    <el-form :model="createForm" label-width="90px">
-      <el-form-item label="用户名">
-        <el-input v-model="createForm.username" placeholder="如 teacher001" />
-      </el-form-item>
-      <el-form-item label="密码">
-        <el-input v-model="createForm.password" placeholder="初始密码" show-password />
-      </el-form-item>
-      <el-form-item label="角色">
-        <el-select v-model="createForm.roles" multiple filterable style="width: 100%" placeholder="选择角色">
-          <el-option v-for="opt in allowedRoleOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="状态">
-        <el-switch v-model="createForm.is_active" active-text="启用" inactive-text="禁用" />
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="createOpen = false">取消</el-button>
-      <el-button type="primary" @click="submitCreate">创建</el-button>
-    </template>
-  </el-dialog>
-
-  <el-dialog v-model="editOpen" title="编辑账号" width="520px">
-    <el-form :model="editForm" label-width="90px">
-      <el-form-item label="用户名">
-        <el-input v-model="editForm.username" disabled />
-      </el-form-item>
-      <el-form-item label="角色">
-        <el-select v-model="editForm.roles" multiple filterable style="width: 100%" placeholder="选择角色">
-          <el-option v-for="opt in allowedRoleOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="状态">
-        <el-switch v-model="editForm.is_active" active-text="启用" inactive-text="禁用" />
-      </el-form-item>
-      <el-form-item label="重置密码">
-        <el-input v-model="editForm.password" placeholder="留空则不修改" show-password />
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="editOpen = false">取消</el-button>
-      <el-button type="primary" @click="submitEdit">保存</el-button>
-    </template>
-  </el-dialog>
-
-  <el-dialog v-model="roleEditOpen" title="编辑角色权限" width="640px">
-    <el-form :model="roleEditForm" label-width="90px">
-      <el-form-item label="角色">
-        <el-input v-model="roleEditForm.name" disabled />
-      </el-form-item>
-      <el-form-item label="权限码">
-        <el-select v-model="roleEditForm.permission_codes" multiple filterable style="width: 100%" placeholder="选择或搜索权限码">
-          <el-option v-for="opt in permissionOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
-        </el-select>
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="roleEditOpen = false">取消</el-button>
-      <el-button type="primary" @click="submitRolePerms">保存</el-button>
-    </template>
-  </el-dialog>
+    <!-- Role Permissions Dialog -->
+    <el-dialog v-model="roleEditOpen" title="配置角色权限" width="600px">
+      <el-form :model="roleEditForm" label-position="top">
+        <el-form-item label="正在编辑的角色">
+          <el-tag effect="dark" type="warning">{{ roleEditForm.name }}</el-tag>
+        </el-form-item>
+        <el-form-item label="勾选/搜索权限码">
+          <el-select 
+            v-model="roleEditForm.permission_codes" 
+            multiple 
+            filterable 
+            style="width: 100%" 
+            placeholder="请选择权限码"
+          >
+            <el-option v-for="opt in permissionOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="roleEditOpen = false">取消</el-button>
+        <el-button type="primary" @click="submitRolePerms">应用更改</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
+
+<style scoped>
+.admin-users-container {
+  padding: 0;
+}
+
+.main-card {
+  border-radius: 12px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.title-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 18px;
+  color: #303133;
+}
+
+.admin-tabs {
+  margin-top: 10px;
+}
+
+.table-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.left-tools {
+  display: flex;
+  gap: 12px;
+}
+
+.rbac-toolbar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.data-table {
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.user-cell, .role-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #606266;
+}
+
+.role-tags, .perm-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.empty-text {
+  font-size: 13px;
+  color: #c0c4cc;
+  font-style: italic;
+}
+
+:deep(.el-tabs__item.is-active) {
+  font-weight: 600;
+}
+
+:deep(.el-table__header) {
+  background-color: #f5f7fa;
+}
+</style>

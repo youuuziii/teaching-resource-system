@@ -2,25 +2,29 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { 
+  User, 
+  Phone, 
+  Lock, 
+  Bell, 
+  Edit, 
+  Check, 
+  Clock,
+  CircleCheck,
+  InfoFilled
+} from '@element-plus/icons-vue'
 import api from '../api/client'
 
 const router = useRouter()
 
 const loading = ref(false)
 const user = ref(null)
-const tab = ref('recommend')
 
 const editOpen = ref(false)
 const editForm = ref({ phone: '', password: '' })
 
-const loadingHistory = ref(false)
-const historyItems = ref([])
-
-const loadingFavorites = ref(false)
-const favorites = ref([])
-
-const loadingRecommend = ref(false)
-const recommendations = ref([])
+const notifications = ref([])
+const loadingNotifications = ref(false)
 
 const isAuthed = computed(() => (localStorage.getItem('token') || '').length > 0)
 const roles = computed(() => {
@@ -76,147 +80,280 @@ async function submitEdit() {
   }
 }
 
-async function fetchHistory() {
-  loadingHistory.value = true
+async function fetchNotifications() {
+  loadingNotifications.value = true
   try {
-    const resp = await api.get('/api/me/history', { params: { limit: 50 } })
-    historyItems.value = resp.data.items || []
+    const resp = await api.get('/api/notifications')
+    notifications.value = resp.data.items || []
   } catch (e) {
-    historyItems.value = []
+    notifications.value = []
   } finally {
-    loadingHistory.value = false
+    loadingNotifications.value = false
   }
 }
 
-async function fetchFavorites() {
-  loadingFavorites.value = true
+async function markAsRead(notification) {
+  if (notification.is_read) return
   try {
-    const resp = await api.get('/api/me/favorites')
-    favorites.value = resp.data.items || []
+    await api.post(`/api/notifications/${notification.id}/read`)
+    notification.is_read = true
   } catch (e) {
-    favorites.value = []
-  } finally {
-    loadingFavorites.value = false
+    ElMessage.error('标记已读失败')
   }
 }
 
-async function fetchRecommendations() {
-  loadingRecommend.value = true
+async function markAllAsRead() {
   try {
-    const resp = await api.get('/api/recommendations')
-    recommendations.value = resp.data.items || []
+    await api.post('/api/notifications/read-all')
+    notifications.value.forEach(n => n.is_read = true)
+    ElMessage.success('全部标记为已读')
   } catch (e) {
-    recommendations.value = []
-  } finally {
-    loadingRecommend.value = false
+    ElMessage.error('操作失败')
   }
 }
 
 onMounted(async () => {
   if (!isAuthed.value) return
   await fetchMe()
-  if (isStudent.value) {
-    await Promise.all([fetchHistory(), fetchFavorites(), fetchRecommendations()])
-  }
+  await fetchNotifications()
 })
 </script>
 
 <template>
-  <el-row :gutter="16">
-    <el-col :xs="24" :md="10">
-      <el-card>
-        <template #header>
-          <div style="display: flex; justify-content: space-between; align-items: center">
-            <span>个人信息</span>
-            <el-button v-if="isAuthed" size="small" @click="openEdit">编辑</el-button>
+  <div class="profile-container">
+    <el-row :gutter="24">
+      <!-- Left: User Profile -->
+      <el-col :xs="24" :md="8">
+        <el-card class="user-profile-card" shadow="never">
+          <div class="profile-header">
+            <el-avatar :size="80" :icon="User" class="avatar" />
+            <h2 class="username">{{ user?.username || '未登录' }}</h2>
+            <div class="role-tags">
+              <el-tag v-for="r in (user?.roles || [])" :key="r" size="small" effect="dark" round>
+                {{ r }}
+              </el-tag>
+            </div>
           </div>
-        </template>
-        <el-alert v-if="!isAuthed" type="warning" show-icon :closable="false">
-          请先登录后查看个人中心
-        </el-alert>
-        <el-skeleton v-else :loading="loading" animated>
-          <template #default>
-            <el-descriptions v-if="user" :column="1" border>
-              <el-descriptions-item label="用户 ID">{{ user.id }}</el-descriptions-item>
-              <el-descriptions-item label="用户名">{{ user.username }}</el-descriptions-item>
-              <el-descriptions-item label="角色">{{ (user.roles || []).join(', ') }}</el-descriptions-item>
-              <el-descriptions-item label="手机号">{{ user.phone || '-' }}</el-descriptions-item>
-            </el-descriptions>
+          
+          <div class="profile-info">
+            <div class="info-item">
+              <el-icon><InfoFilled /></el-icon>
+              <span class="label">用户 ID</span>
+              <span class="value">{{ user?.id || '-' }}</span>
+            </div>
+            <div class="info-item">
+              <el-icon><Phone /></el-icon>
+              <span class="label">手机号</span>
+              <span class="value">{{ user?.phone || '未设置' }}</span>
+            </div>
+            <div class="info-item">
+              <el-icon><Clock /></el-icon>
+              <span class="label">注册时间</span>
+              <span class="value">{{ user?.created_at ? new Date(user.created_at).toLocaleDateString() : '-' }}</span>
+            </div>
+          </div>
+
+          <el-button class="edit-btn" :icon="Edit" @click="openEdit" block>
+            编辑个人资料
+          </el-button>
+        </el-card>
+      </el-col>
+
+      <!-- Right: Notifications -->
+      <el-col :xs="24" :md="16">
+        <el-card class="notification-card" shadow="never">
+          <template #header>
+            <div class="card-header">
+              <div class="title-with-icon">
+                <el-icon><Bell /></el-icon>
+                <span>消息通知</span>
+              </div>
+              <el-button v-if="notifications.length > 0" size="small" :icon="CircleCheck" @click="markAllAsRead">
+                全部标记已读
+              </el-button>
+            </div>
           </template>
-        </el-skeleton>
-      </el-card>
-    </el-col>
 
-    <el-col :xs="24" :md="14">
-      <el-card>
-        <template #header>
-          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
-            <div style="font-weight: 600">学习与推荐</div>
-            <el-button v-if="isAuthed && isStudent" @click="fetchHistory">刷新轨迹</el-button>
-            <el-button v-if="isAuthed && isStudent" @click="fetchFavorites">刷新收藏</el-button>
-            <el-button v-if="isAuthed && isStudent" type="primary" @click="fetchRecommendations">刷新推荐</el-button>
+          <div v-loading="loadingNotifications" class="notification-list">
+            <el-empty v-if="notifications.length === 0" description="暂无通知消息" />
+            <el-timeline v-else>
+              <el-timeline-item
+                v-for="n in notifications"
+                :key="n.id"
+                :timestamp="new Date(n.created_at).toLocaleString()"
+                :type="n.is_read ? 'info' : 'primary'"
+                :hollow="n.is_read"
+                placement="top"
+              >
+                <el-card shadow="hover" class="notification-item" :class="{ 'unread': !n.is_read }" @click="markAsRead(n)">
+                  <div class="notification-content">
+                    <div class="notif-header">
+                      <span class="notif-title">{{ n.title }}</span>
+                      <el-tag v-if="!n.is_read" size="small" type="danger" effect="dark" dot>新</el-tag>
+                    </div>
+                    <p class="notif-text">{{ n.content }}</p>
+                  </div>
+                </el-card>
+              </el-timeline-item>
+            </el-timeline>
           </div>
-        </template>
+        </el-card>
+      </el-col>
+    </el-row>
 
-        <el-alert v-if="isAuthed && !isStudent" type="info" show-icon :closable="false">
-          当前角色无学习轨迹、收藏夹与推荐功能
-        </el-alert>
-
-        <el-tabs v-else v-model="tab">
-          <el-tab-pane label="推荐" name="recommend">
-            <el-table :data="recommendations" v-loading="loadingRecommend" style="width: 100%">
-              <el-table-column label="资源" min-width="220">
-                <template #default="{ row }">
-                  <el-link type="primary" @click="openDetail(row.resource)">{{ row.resource?.title }}</el-link>
-                </template>
-              </el-table-column>
-              <el-table-column label="理由" min-width="260">
-                <template #default="{ row }">
-                  <el-text>{{ (row.reasons || []).join('；') || '-' }}</el-text>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-tab-pane>
-
-          <el-tab-pane label="学习轨迹" name="history">
-            <el-table :data="historyItems" v-loading="loadingHistory" style="width: 100%">
-              <el-table-column label="资源" min-width="220">
-                <template #default="{ row }">
-                  <el-link type="primary" @click="openDetail(row.resource)">{{ row.resource?.title }}</el-link>
-                </template>
-              </el-table-column>
-              <el-table-column prop="viewed_at" label="时间" min-width="200" />
-            </el-table>
-          </el-tab-pane>
-
-          <el-tab-pane label="收藏夹" name="favorites">
-            <el-table :data="favorites" v-loading="loadingFavorites" style="width: 100%">
-              <el-table-column label="资源" min-width="220">
-                <template #default="{ row }">
-                  <el-link type="primary" @click="openDetail(row)">{{ row.title }}</el-link>
-                </template>
-              </el-table-column>
-              <el-table-column prop="course" label="课程" min-width="120" />
-              <el-table-column prop="knowledge_point" label="知识点" min-width="140" />
-            </el-table>
-          </el-tab-pane>
-        </el-tabs>
-      </el-card>
-    </el-col>
-  </el-row>
-
-  <el-dialog v-model="editOpen" title="编辑个人信息" width="420px">
-    <el-form :model="editForm" label-width="80px">
-      <el-form-item label="手机号">
-        <el-input v-model="editForm.phone" placeholder="请输入手机号" />
-      </el-form-item>
-      <el-form-item label="新密码">
-        <el-input v-model="editForm.password" placeholder="留空则不修改" show-password />
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="editOpen = false">取消</el-button>
-      <el-button type="primary" @click="submitEdit">保存</el-button>
-    </template>
-  </el-dialog>
+    <!-- Edit Dialog -->
+    <el-dialog v-model="editOpen" title="编辑个人信息" width="400px" border-radius="12px">
+      <el-form :model="editForm" label-position="top">
+        <el-form-item label="手机号">
+          <el-input v-model="editForm.phone" placeholder="请输入手机号" :prefix-icon="Phone" />
+        </el-form-item>
+        <el-form-item label="修改密码">
+          <el-input v-model="editForm.password" placeholder="留空则不修改" :prefix-icon="Lock" show-password />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="editOpen = false">取消</el-button>
+          <el-button type="primary" @click="submitEdit">保存更改</el-button>
+        </div>
+      </template>
+    </el-dialog>
+  </div>
 </template>
+
+<style scoped>
+.profile-container {
+  padding: 0;
+}
+
+.user-profile-card {
+  border-radius: 12px;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.profile-header {
+  margin-bottom: 30px;
+}
+
+.avatar {
+  background: #f0f7ff;
+  color: #409eff;
+  margin-bottom: 16px;
+  border: 4px solid #fff;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.username {
+  margin: 0 0 12px;
+  font-size: 20px;
+  color: #303133;
+}
+
+.role-tags {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.profile-info {
+  text-align: left;
+  padding: 0 20px;
+  margin-bottom: 30px;
+}
+
+.info-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.info-item .el-icon {
+  color: #909399;
+}
+
+.info-item .label {
+  color: #909399;
+  width: 70px;
+}
+
+.info-item .value {
+  color: #303133;
+  font-weight: 500;
+}
+
+.edit-btn {
+  width: calc(100% - 40px);
+  margin: 0 20px;
+  height: 40px;
+  border-radius: 8px;
+}
+
+.notification-card {
+  border-radius: 12px;
+  min-height: 500px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.title-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.notification-list {
+  padding: 10px 0;
+}
+
+.notification-item {
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid #f0f2f5;
+  transition: all 0.3s;
+}
+
+.notification-item:hover {
+  border-color: #409eff;
+  background: #fdfdfd;
+}
+
+.notification-item.unread {
+  border-left: 4px solid #409eff;
+  background: #f0f7ff;
+}
+
+.notif-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.notif-title {
+  font-weight: 600;
+  color: #303133;
+}
+
+.notif-text {
+  margin: 0;
+  font-size: 14px;
+  color: #606266;
+  line-height: 1.6;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+</style>

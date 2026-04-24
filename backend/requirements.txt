@@ -5,3 +5,5 @@ PyMySQL==1.1.1
 PyJWT==2.9.0
 neo4j==5.27.0
 python-dotenv==1.0.1
+jieba==0.42.1
+pdfplumber==0.11.0

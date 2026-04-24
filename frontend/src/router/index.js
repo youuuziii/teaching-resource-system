@@ -6,6 +6,7 @@ import AdminUsersView from '../views/AdminUsersView.vue'
 import GraphView from '../views/GraphView.vue'
 import LoginView from '../views/LoginView.vue'
 import ProfileView from '../views/ProfileView.vue'
+import LearningView from '../views/LearningView.vue'
 import ResourceDetailView from '../views/ResourceDetailView.vue'
 import ResourceListView from '../views/ResourceListView.vue'
 import TeacherCoursesView from '../views/TeacherCoursesView.vue'
@@ -17,6 +18,7 @@ const router = createRouter({
     { path: '/resources/:id', component: ResourceDetailView },
     { path: '/graph', component: GraphView },
     { path: '/profile', component: ProfileView },
+    { path: '/learning', component: LearningView },
     { path: '/login', component: LoginView },
     { path: '/admin/audit', component: AdminAuditView },
     { path: '/admin/courses', component: AdminCoursesView },
@@ -31,6 +33,15 @@ router.beforeEach((to) => {
   if (to.path === '/' || to.path === '/graph') return true
   const token = localStorage.getItem('token')
   if (!token) return { path: '/login' }
+  if (to.path === '/learning') {
+    try {
+      const user = JSON.parse(localStorage.getItem('user') || 'null')
+      const roles = Array.isArray(user?.roles) ? user.roles : []
+      if (!roles.includes('student')) return { path: '/' }
+    } catch {
+      return { path: '/' }
+    }
+  }
   if (to.path.startsWith('/admin')) {
     try {
       const user = JSON.parse(localStorage.getItem('user') || 'null')
@@ -57,9 +68,7 @@ router.beforeEach((to) => {
       const user = JSON.parse(localStorage.getItem('user') || 'null')
       const roles = Array.isArray(user?.roles) ? user.roles : []
       const isTeacher = roles.includes('teacher')
-      const isAdmin = roles.includes('admin')
-      const isDean = roles.includes('dean')
-      if (!isTeacher || isAdmin || isDean) return { path: '/' }
+      if (!isTeacher) return { path: '/' }
     } catch {
       return { path: '/' }
     }

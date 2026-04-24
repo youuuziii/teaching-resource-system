@@ -1,10 +1,12 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api/client'
 
 const loading = ref(false)
 const items = ref([])
+const selectedRows = ref([])
+const deleting = ref(false)
 
 const state = reactive({
   status: 'pending',
@@ -29,6 +31,7 @@ const roles = computed(() => {
 const isSystemAdmin = computed(() => roles.value.includes('admin'))
 const isDean = computed(() => roles.value.includes('dean'))
 const canAudit = computed(() => isDean.value)
+const canBatchDelete = computed(() => isDean.value || isSystemAdmin.value)
 
 if (isSystemAdmin.value && state.status === 'pending') state.status = 'rejected'
 
@@ -44,11 +47,45 @@ async function fetchList() {
   }
 }
 
+function onSelectionChange(rows) {
+  selectedRows.value = Array.isArray(rows) ? rows : []
+}
+
 function openAudit(row, nextStatus) {
   dialog.open = true
   dialog.target = row
   dialog.nextStatus = nextStatus
   dialog.comment = ''
+}
+
+async function batchDelete() {
+  if (!canBatchDelete.value) return
+  const ids = (selectedRows.value || []).map((r) => r?.id).filter((x) => typeof x === 'number' && Number.isFinite(x))
+  if (ids.length === 0) {
+    ElMessage.warning('请先勾选要删除的资源')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认批量删除已选 ${ids.length} 个资源？将同步删除资源关联关系与知识图谱中的对应内容，且不可恢复。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    const resp = await api.post('/api/resources/batch-delete', { ids })
+    const d = resp.data?.deleted || {}
+    ElMessage.success(`批量删除完成（资源:${d.resources || 0} 文件:${d.resource_files || 0} 关联:${(d.tags || 0) + (d.resource_teachers || 0)}）`)
+    selectedRows.value = []
+    await fetchList()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '批量删除失败')
+  } finally {
+    deleting.value = false
+  }
 }
 
 async function submitAudit() {
@@ -82,13 +119,23 @@ onMounted(fetchList)
         <el-select v-model="state.status" style="width: 140px" @change="fetchList">
           <el-option v-if="canAudit" label="待审核" value="pending" />
           <el-option label="已拒绝" value="rejected" />
-          <el-option v-if="isSystemAdmin" label="已通过" value="approved" />
+          <el-option v-if="canBatchDelete" label="已通过" value="approved" />
         </el-select>
         <el-button type="primary" :loading="loading" @click="fetchList">刷新</el-button>
+        <el-button
+          v-if="canBatchDelete"
+          type="danger"
+          :disabled="(selectedRows || []).length === 0"
+          :loading="deleting"
+          @click="batchDelete"
+        >
+          批量删除
+        </el-button>
       </div>
     </template>
 
-    <el-table :data="items" v-loading="loading" style="width: 100%">
+    <el-table :data="items" v-loading="loading" style="width: 100%" @selection-change="onSelectionChange">
+      <el-table-column v-if="canBatchDelete" type="selection" width="44" />
       <el-table-column prop="title" label="标题" min-width="220" />
       <el-table-column prop="course" label="课程" min-width="120" />
       <el-table-column prop="knowledge_point" label="知识点" min-width="140" />
