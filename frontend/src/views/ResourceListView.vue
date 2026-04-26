@@ -225,10 +225,6 @@ onMounted(async () => {
                   <el-icon><Reading /></el-icon>
                   <span>{{ item.course || '通用课程' }}</span>
                 </div>
-                <div class="meta-item">
-                  <el-icon><User /></el-icon>
-                  <span>{{ (item.teachers || []).map(t => t.name).join(', ') || '-' }}</span>
-                </div>
               </div>
 
               <div class="resource-tags">

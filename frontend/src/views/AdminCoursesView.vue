@@ -32,7 +32,10 @@ const rolesOfMe = computed(() => {
 const isDean = computed(() => rolesOfMe.value.includes('dean') || rolesOfMe.value.includes('admin'))
 
 const createOpen = ref(false)
-const createForm = ref({ name: '', code: '', department: '', description: '' })
+const createForm = ref({ name: '', code: '', major_ids: [], description: '' })
+const tempAssignment = ref({ department_id: null, major_ids: [] })
+const departments = ref([])
+const majors = ref([])
 
 const assignOpen = ref(false)
 const assignLoading = ref(false)
@@ -40,6 +43,35 @@ const assignCourse = ref(null)
 const assignments = ref([{ teacher_id: null, class_name: '' }])
 
 const teacherOptions = computed(() => (teachers.value || []).map((t) => ({ label: `${t.name}${t.has_user ? '' : ' (未绑定账号)'}`, value: t.id })))
+
+const filteredMajors = computed(() => {
+  if (!tempAssignment.value.department_id) return majors.value
+  return majors.value.filter(m => m.department_id === tempAssignment.value.department_id)
+})
+
+const selectedMajorsList = computed(() => {
+  return (createForm.value.major_ids || []).map(mid => {
+    const m = majors.value.find(x => x.id === mid)
+    if (!m) return null
+    const d = departments.value.find(x => x.id === m.department_id)
+    return { id: mid, name: m.name, deptName: d ? d.name : '未知学院' }
+  }).filter(x => x !== null)
+})
+
+function addMajors() {
+  if (!tempAssignment.value.major_ids || tempAssignment.value.major_ids.length === 0) {
+    ElMessage.warning('请选择专业')
+    return
+  }
+  const current = new Set(createForm.value.major_ids || [])
+  tempAssignment.value.major_ids.forEach(id => current.add(id))
+  createForm.value.major_ids = Array.from(current)
+  tempAssignment.value.major_ids = []
+}
+
+function removeMajorFromForm(mid) {
+  createForm.value.major_ids = (createForm.value.major_ids || []).filter(id => id !== mid)
+}
 
 async function fetchCourses() {
   loading.value = true
@@ -54,7 +86,35 @@ async function fetchCourses() {
   }
 }
 
+async function fetchDepartments() {
+  try {
+    const resp = await api.get('/api/departments')
+    departments.value = resp.data.items || []
+  } catch (e) {
+    departments.value = []
+  }
+}
+
+async function fetchMajors() {
+  try {
+    const resp = await api.get('/api/majors')
+    majors.value = resp.data.items || []
+  } catch (e) {
+    majors.value = []
+  }
+}
+
+async function syncGraph() {
+  try {
+    await api.post('/api/admin/graph/sync')
+    ElMessage.success('图谱全量重构成功')
+  } catch (e) {
+    ElMessage.error('图谱重构失败')
+  }
+}
+
 async function fetchTeachers() {
+
   try {
     const resp = await api.get('/api/teachers')
     teachers.value = resp.data.items || []
@@ -84,25 +144,34 @@ async function refreshAssignedMap() {
 }
 
 function openCreate() {
-  createForm.value = { id: null, name: '', code: '', department: '', description: '' }
+  createForm.value = { id: null, name: '', code: '', major_ids: [], description: '' }
+  tempAssignment.value = { department_id: null, major_ids: [] }
   createOpen.value = true
 }
 
 function openEdit(row) {
+  const selectedMajorIds = (row.majors || []).map(mName => {
+    const found = majors.value.find(m => m.name === mName)
+    return found ? found.id : null
+  }).filter(id => id !== null)
+
   createForm.value = { 
     id: row.id, 
     name: row.name || '', 
     code: row.code || '', 
-    department: row.department || '', 
+    major_ids: selectedMajorIds, 
     description: row.description || '' 
   }
+  tempAssignment.value = { department_id: null, major_ids: [] }
   createOpen.value = true
 }
+
+
 
 async function submitCreate() {
   const name = (createForm.value.name || '').trim()
   const code = (createForm.value.code || '').trim()
-  const department = (createForm.value.department || '').trim()
+  const major_ids = createForm.value.major_ids || []
   const description = (createForm.value.description || '').trim()
   if (!name) {
     ElMessage.warning('请输入课程名称')
@@ -112,9 +181,10 @@ async function submitCreate() {
     await api.post('/api/courses', { 
       name, 
       code: code || undefined, 
-      department: department || undefined,
+      major_ids: major_ids,
       description: description || undefined 
     })
+
     ElMessage.success('课程创建/更新成功')
     createOpen.value = false
     await fetchCourses()
@@ -202,7 +272,7 @@ async function removeCourse(row) {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchCourses(), fetchTeachers()])
+  await Promise.all([fetchCourses(), fetchTeachers(), fetchMajors(), fetchDepartments()])
   await refreshAssignedMap()
 })
 </script>
@@ -225,8 +295,10 @@ onMounted(async () => {
               :prefix-icon="Search"
               @keyup.enter="async () => { await fetchCourses(); await refreshAssignedMap() }" 
             />
+            <el-button type="warning" plain :icon="Refresh" @click="syncGraph">重构图谱</el-button>
             <el-button type="primary" :icon="Plus" @click="openCreate">新增课程</el-button>
           </div>
+
         </div>
       </template>
 
@@ -239,7 +311,7 @@ onMounted(async () => {
               <el-icon><Collection /></el-icon>
               <div class="course-text">
                 <div class="course-name">{{ row.name }}</div>
-                <div class="course-code">编码: {{ row.code || '无' }} | 系: {{ row.department || '未指定' }}</div>
+                <div class="course-code">编码: {{ row.code || '无' }} | 专业: {{ (row.majors || []).join(', ') || '未指定' }}</div>
               </div>
             </div>
           </template>
@@ -289,10 +361,43 @@ onMounted(async () => {
         <el-form-item label="课程编码">
           <el-input v-model="createForm.code" placeholder="如: MATH-101" />
         </el-form-item>
-        <el-form-item label="所属院系">
-          <el-input v-model="createForm.department" placeholder="支持多个院系，用逗号分隔（如: 计算机系, 数学系）" />
-        </el-form-item>
-        <el-form-item label="课程简述">
+        
+        <el-divider content-position="left">专业关联</el-divider>
+        
+        <div class="major-selection-box">
+          <el-row :gutter="12">
+            <el-col :span="10">
+              <el-select v-model="tempAssignment.department_id" clearable placeholder="选择院系" style="width: 100%" @change="tempAssignment.major_ids = []">
+                <el-option v-for="d in departments" :key="d.id" :label="d.name" :value="d.id" />
+              </el-select>
+            </el-col>
+            <el-col :span="10">
+              <el-select v-model="tempAssignment.major_ids" multiple collapse-tags placeholder="选择专业" style="width: 100%">
+                <el-option v-for="m in filteredMajors" :key="m.id" :label="m.name" :value="m.id" />
+              </el-select>
+            </el-col>
+            <el-col :span="4">
+              <el-button type="primary" plain @click="addMajors">添加</el-button>
+            </el-col>
+          </el-row>
+
+          <div class="selected-majors-tags" v-if="selectedMajorsList.length > 0">
+            <el-tag
+              v-for="m in selectedMajorsList"
+              :key="m.id"
+              closable
+              class="major-tag"
+              @close="removeMajorFromForm(m.id)"
+            >
+              [{{ m.deptName }}] {{ m.name }}
+            </el-tag>
+          </div>
+          <div v-else class="empty-selection">暂无关联专业</div>
+        </div>
+
+        <el-form-item label="课程简述" style="margin-top: 20px">
+
+
           <el-input v-model="createForm.description" type="textarea" :rows="3" placeholder="简要介绍课程教学内容..." />
         </el-form-item>
       </el-form>
@@ -385,9 +490,8 @@ onMounted(async () => {
 }
 
 .course-code {
-  font-size: 12px;
+  font-size: 13px;
   color: #909399;
-  margin-top: 2px;
 }
 
 .assignment-tags {
@@ -438,5 +542,30 @@ onMounted(async () => {
 
 :deep(.el-table__header) {
   background-color: #f5f7fa;
+}
+
+.major-selection-box {
+  background: #f8f9fa;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
+}
+
+.selected-majors-tags {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.major-tag {
+  margin-bottom: 4px;
+}
+
+.empty-selection {
+  margin-top: 12px;
+  text-align: center;
+  color: #c0c4cc;
+  font-size: 13px;
 }
 </style>

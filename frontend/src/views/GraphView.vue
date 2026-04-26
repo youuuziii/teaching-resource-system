@@ -13,6 +13,7 @@ let chart = null
 
 const course = ref('')
 const isFull = ref(false)
+const layout = ref('force') // 'force' or 'circular'
 const graph = ref({ nodes: [], links: [], source: '' })
 
 const drawerOpen = ref(false)
@@ -26,7 +27,7 @@ async function load() {
     const resp = await api.get('/api/graph/overview', {
       params: { 
         course: course.value || undefined, 
-        level: isFull.value ? 'full' : 'courses' 
+        level: isFull.value ? 'full' : 'departments' 
       },
     })
     graph.value = resp.data
@@ -72,11 +73,14 @@ async function exploreByNode(node) {
     const nodeType = node?.value || node?.category
     const isCourse = nodeType === 'course'
     const isKnowledgePoint = nodeType === 'knowledge_point'
+    const isMajor = nodeType === 'major'
+    const isDepartment = nodeType === 'department'
+    
     const resp = await api.get('/api/graph/explore', {
       params: {
         node_id: node.id,
         depth: isKnowledgePoint ? 2 : 1,
-        expand: isCourse ? 'kps' : isKnowledgePoint ? 'resources' : 'full',
+        expand: (isCourse || isMajor || isDepartment) ? 'full' : isKnowledgePoint ? 'resources' : 'full',
       },
     })
     mergeGraph(resp.data)
@@ -110,15 +114,22 @@ function openDetail(row) {
 
 function render() {
   if (!chartEl.value) return
-  if (!chart) chart = echarts.init(chartEl.value)
+  if (!chart) {
+    chart = echarts.init(chartEl.value)
+    chart.on('click', (params) => {
+      if (params?.dataType !== 'node') return
+      exploreByNode(params.data)
+    })
+  }
 
   const nodes = (graph.value.nodes || []).map((n) => ({
     id: n.id,
     name: n.label || n.id,
     value: n.type,
     category: n.type,
-    symbolSize: n.type === 'resource' ? 18 : (n.type === 'knowledge_point' || n.type === 'department') ? 26 : 30,
+    symbolSize: n.type === 'resource' ? 18 : n.type === 'knowledge_point' ? 24 : (n.type === 'major' || n.type === 'department') ? 32 : 36,
   }))
+
   const links = (graph.value.links || []).map((e) => ({
     source: e.source,
     target: e.target,
@@ -132,23 +143,30 @@ function render() {
     series: [
       {
         type: 'graph',
-        layout: 'force',
+        layout: layout.value,
         roam: true,
         draggable: true,
         data: nodes,
         links,
         categories,
-        force: { repulsion: 120, edgeLength: 90 },
+        force: layout.value === 'force' ? { repulsion: 120, edgeLength: 90 } : undefined,
+        circular: layout.value === 'circular' ? { rotateLabel: true } : undefined,
         label: { show: true },
+        emphasis: {
+          focus: 'adjacency',
+          lineStyle: { width: 4 }
+        },
+        blur: {
+          itemStyle: {
+            opacity: 0.6 // 提高淡出节点的透明度，默认约 0.1-0.2 太暗了
+          },
+          lineStyle: {
+            opacity: 0.3 // 线条也相应调亮一点
+          }
+        }
       },
     ],
-  })
-
-  chart.off('click')
-  chart.on('click', (params) => {
-    if (params?.dataType !== 'node') return
-    exploreByNode(params.data)
-  })
+  }, true)
 }
 
 onMounted(() => {
@@ -171,6 +189,12 @@ watch(course, () => load())
           inactive-text="基础视图"
           @change="load"
         />
+        
+        <el-radio-group v-model="layout" size="small" @change="render">
+          <el-radio-button label="force">力导向</el-radio-button>
+          <el-radio-button label="circular">环形</el-radio-button>
+        </el-radio-group>
+
         <el-tag type="info">{{ graph.source || 'unknown' }}</el-tag>
         <el-button :loading="loading" @click="load">刷新</el-button>
       </div>
@@ -193,12 +217,7 @@ watch(course, () => load())
       </el-table-column>
       <el-table-column prop="course" label="课程" min-width="120" />
       <el-table-column prop="knowledge_point" label="知识点" min-width="140" />
-      <el-table-column label="教师" min-width="140">
-        <template #default="{ row }">
-          <span v-if="(row.teachers || []).length === 0">-</span>
-          <el-tag v-for="t in row.teachers || []" :key="t.id" style="margin-right: 6px" size="small">{{ t.name }}</el-tag>
-        </template>
-      </el-table-column>
     </el-table>
+
   </el-drawer>
 </template>

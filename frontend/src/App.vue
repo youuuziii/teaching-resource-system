@@ -14,6 +14,7 @@ import {
   SwitchButton,
   Notebook
 } from '@element-plus/icons-vue'
+import logo from './assets/logo.png'
 
 const route = useRoute()
 const router = useRouter()
@@ -51,8 +52,8 @@ function logout() {
     <el-header class="app-header">
       <div class="header-content">
         <div class="logo-section" @click="go('/')">
-          <img src="./assets/vue.svg" alt="Logo" class="logo" />
-          <span class="title">教学资源系统</span>
+          <img :src="logo" alt="Logo" class="nav-logo" />
+          <span class="title">教学资源管理系统</span>
         </div>
         
         <el-menu 
@@ -178,14 +179,15 @@ body {
 .logo-section {
   display: flex;
   align-items: center;
-  gap: 12px;
   cursor: pointer;
-  margin-right: 40px;
+  padding: 0 10px;
 }
 
-.logo-section .logo {
+.nav-logo {
   width: 32px;
   height: 32px;
+  object-fit: contain;
+  margin-right: 10px;
 }
 
 .logo-section .title {

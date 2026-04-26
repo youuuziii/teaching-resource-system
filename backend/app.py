@@ -3,8 +3,12 @@ import json
 import os
 import re
 import uuid
+import traceback
+import requests
 import jieba
 import jieba.analyse
+import jieba.posseg as pseg
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -58,6 +62,10 @@ class Settings:
     neo4j_password: Optional[str]
     upload_dir: Path
     cors_origins: List[str]
+    # LLM Configuration (e.g., Qwen, OpenAI)
+    llm_api_key: Optional[str]
+    llm_base_url: str
+    llm_model: str
 
     @staticmethod
     def from_env() -> "Settings":
@@ -82,6 +90,9 @@ class Settings:
             neo4j_password=neo4j_password,
             upload_dir=upload_dir,
             cors_origins=cors_origins,
+            llm_api_key=os.getenv("LLM_API_KEY"),
+            llm_base_url=os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
         )
 
 
@@ -157,22 +168,45 @@ class Course(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    department: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    department: Mapped[Optional[str]] = mapped_column(String(120), nullable=True) # deprecated
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
-    course_departments: Mapped[List["CourseDepartment"]] = relationship("CourseDepartment", back_populates="course", cascade="all, delete-orphan")
+    course_majors: Mapped[List["CourseMajor"]] = relationship("CourseMajor", back_populates="course", cascade="all, delete-orphan")
+    chapters: Mapped[List["Chapter"]] = relationship("Chapter", back_populates="course", cascade="all, delete-orphan")
 
 
-class CourseDepartment(Base):
-    __tablename__ = "course_departments"
-    __table_args__ = (UniqueConstraint("course_id", "department"),)
+class Major(Base):
+    __tablename__ = "majors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey("departments.id"), nullable=True)
+
+    department: Mapped[Optional["Department"]] = relationship("Department", back_populates="majors")
+
+
+class Department(Base):
+    __tablename__ = "departments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    majors: Mapped[List[Major]] = relationship("Major", back_populates="department", cascade="all, delete-orphan")
+
+
+class CourseMajor(Base):
+    __tablename__ = "course_majors"
+    __table_args__ = (UniqueConstraint("course_id", "major_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), nullable=False)
-    department: Mapped[str] = mapped_column(String(120), nullable=False)
+    major_id: Mapped[int] = mapped_column(ForeignKey("majors.id"), nullable=False)
 
-    course: Mapped[Course] = relationship("Course", back_populates="course_departments")
+    course: Mapped[Course] = relationship("Course", back_populates="course_majors")
+    major: Mapped[Major] = relationship("Major")
 
 
 class Chapter(Base):
@@ -185,7 +219,7 @@ class Chapter(Base):
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
-    course: Mapped[Course] = relationship("Course")
+    course: Mapped[Course] = relationship("Course", back_populates="chapters")
     sections: Mapped[List["Section"]] = relationship("Section", back_populates="chapter", cascade="all, delete-orphan")
 
 
@@ -217,6 +251,18 @@ class KnowledgePoint(Base):
     course: Mapped[Optional[Course]] = relationship("Course")
     chapter: Mapped[Optional[Chapter]] = relationship("Chapter")
     section: Mapped[Optional[Section]] = relationship("Section", back_populates="knowledge_points")
+
+
+class Blacklist(Base):
+    __tablename__ = "blacklist"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    word: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id"), nullable=True)  # NULL表示全局黑名单
+    reason: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    course: Mapped[Optional[Course]] = relationship("Course")
 
 
 class Teacher(Base):
@@ -252,17 +298,6 @@ class Dean(Base):
     email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
-
-class ResourceTeacher(Base):
-    __tablename__ = "resource_teachers"
-    __table_args__ = (UniqueConstraint("resource_id", "teacher_id"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id"), nullable=False)
-    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id"), nullable=False)
-
-    teacher: Mapped[Teacher] = relationship("Teacher")
-    resource: Mapped["Resource"] = relationship("Resource", back_populates="resource_teachers")
 
 class CourseTeacher(Base):
     __tablename__ = "course_teachers"
@@ -302,6 +337,7 @@ class Resource(Base):
         default="pending",
     )
     audit_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    suggestion: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     audited_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
     audited_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
@@ -312,9 +348,8 @@ class Resource(Base):
     section: Mapped[Optional[Section]] = relationship("Section", foreign_keys=[section_id])
     knowledge_point: Mapped[Optional[KnowledgePoint]] = relationship("KnowledgePoint", foreign_keys=[knowledge_point_id])
     tags: Mapped[List["ResourceTag"]] = relationship("ResourceTag", back_populates="resource", cascade="all, delete-orphan")
-    resource_teachers: Mapped[List[ResourceTeacher]] = relationship(
-        "ResourceTeacher", back_populates="resource", cascade="all, delete-orphan"
-    )
+    resource_teachers: Mapped[List["ResourceTeacher"]] = relationship("ResourceTeacher", back_populates="resource", cascade="all, delete-orphan")
+    resource_knowledge_points: Mapped[List["ResourceKnowledgePoint"]] = relationship("ResourceKnowledgePoint", back_populates="resource", cascade="all, delete-orphan")
 
 
 class ResourceTag(Base):
@@ -326,6 +361,30 @@ class ResourceTag(Base):
     tag: Mapped[str] = mapped_column(String(64), nullable=False)
 
     resource: Mapped[Resource] = relationship("Resource", back_populates="tags")
+
+
+class ResourceKnowledgePoint(Base):
+    __tablename__ = "resource_knowledge_points"
+    __table_args__ = (UniqueConstraint("resource_id", "knowledge_point_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id"), nullable=False)
+    knowledge_point_id: Mapped[int] = mapped_column(ForeignKey("knowledge_points.id"), nullable=False)
+
+    resource: Mapped["Resource"] = relationship("Resource", back_populates="resource_knowledge_points")
+    knowledge_point: Mapped["KnowledgePoint"] = relationship("KnowledgePoint")
+
+
+class ResourceTeacher(Base):
+    __tablename__ = "resource_teachers"
+    __table_args__ = (UniqueConstraint("resource_id", "teacher_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id"), nullable=False)
+    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id"), nullable=False)
+
+    resource: Mapped[Resource] = relationship("Resource", back_populates="resource_teachers")
+    teacher: Mapped[Teacher] = relationship("Teacher")
 
 
 class UserBehavior(Base):
@@ -388,10 +447,12 @@ def _create_app() -> Flask:
             return
         with neo4j_driver.session() as session:
             session.run("CREATE CONSTRAINT course_name IF NOT EXISTS FOR (c:Course) REQUIRE c.name IS UNIQUE")
-            session.run("CREATE CONSTRAINT dept_name IF NOT EXISTS FOR (d:Department) REQUIRE d.name IS UNIQUE")
+            session.run("CREATE CONSTRAINT major_name IF NOT EXISTS FOR (m:Major) REQUIRE m.name IS UNIQUE")
+            session.run("CREATE CONSTRAINT department_name IF NOT EXISTS FOR (d:Department) REQUIRE d.name IS UNIQUE")
             session.run(
                 "CREATE CONSTRAINT knowledge_point_name IF NOT EXISTS FOR (k:KnowledgePoint) REQUIRE k.name IS UNIQUE"
             )
+
             session.run("CREATE CONSTRAINT teacher_name IF NOT EXISTS FOR (t:Teacher) REQUIRE t.name IS UNIQUE")
             session.run("CREATE CONSTRAINT resource_id IF NOT EXISTS FOR (r:Resource) REQUIRE r.id IS UNIQUE")
             session.run("CREATE CONSTRAINT chapter_id IF NOT EXISTS FOR (c:Chapter) REQUIRE c.id IS UNIQUE")
@@ -481,25 +542,111 @@ def _create_app() -> Flask:
                     {"name": course.name, "code": course.code, "description": course.description},
                 )
                 
-                # Use CourseDepartment relation
-                depts = [cd.department for cd in course.course_departments] if course.course_departments else []
-                if not depts and course.department:
-                    depts = [d.strip() for d in str(course.department).replace("，", ",").split(",") if d.strip()]
+                # Use CourseMajor relation
+                majors_info = []
+                for cm in course.course_majors:
+                    if cm.major:
+                        m_info = {"name": cm.major.name}
+                        if cm.major.department:
+                            m_info["dept"] = cm.major.department.name
+                        majors_info.append(m_info)
                 
-                # Detach existing department links if we want a fresh state
-                session.run("MATCH (c:Course {name: $name})-[r:BELONGS_TO_DEPT]->(:Department) DELETE r", {"name": course.name})
+                # Detach existing major links
+                session.run("MATCH (c:Course {name: $name})-[r:BELONGS_TO_MAJOR]->(:Major) DELETE r", {"name": course.name})
                 
-                for d in depts:
+                for m in majors_info:
                     session.run(
                         """
-                        MERGE (dept:Department {name: $dept})
-                        MERGE (c:Course {name: $name})
-                        MERGE (c)-[:BELONGS_TO_DEPT]->(dept)
+                        MERGE (major:Major {name: $major_name})
+                        MERGE (c:Course {name: $course_name})
+                        MERGE (c)-[:BELONGS_TO_MAJOR]->(major)
                         """,
-                        {"dept": d, "name": course.name},
+                        {"major_name": m["name"], "course_name": course.name},
+                    )
+                    if m.get("dept"):
+                        session.run(
+                            """
+                            MERGE (dept:Department {name: $dept_name})
+                            MERGE (major:Major {name: $major_name})
+                            MERGE (major)-[:BELONGS_TO_DEPT]->(dept)
+                            """,
+                            {"dept_name": m["dept"], "major_name": m["name"]},
+                        )
+
+        except Exception:
+            return
+
+    def _neo4j_upsert_course_teacher(course_id: int, teacher_id: int) -> None:
+        if not neo4j_driver:
+            return
+        try:
+            _neo4j_ensure_constraints()
+            with SessionLocal() as db:
+                course = db.get(Course, course_id)
+                teacher = db.get(Teacher, teacher_id)
+                if not course or not teacher:
+                    return
+                with neo4j_driver.session() as session:
+                    session.run(
+                        """
+                        MERGE (t:Teacher {name: $tname})
+                        MERGE (c:Course {name: $cname})
+                        MERGE (t)-[:TEACHES]->(c)
+                        """,
+                        {"tname": teacher.name, "cname": course.name},
                     )
         except Exception:
             return
+
+    def _neo4j_upsert_chapter(ch: Chapter) -> None:
+        if not neo4j_driver:
+            return
+        try:
+            _neo4j_ensure_constraints()
+            with neo4j_driver.session() as session:
+                session.run(
+                    """
+                    MERGE (ch:Chapter {id: $id})
+                    SET ch.name = $name
+                    """,
+                    {"id": ch.id, "name": ch.name},
+                )
+                if ch.course:
+                    session.run(
+                        """
+                        MERGE (c:Course {name: $cname})
+                        MERGE (ch:Chapter {id: $id})
+                        MERGE (c)-[:HAS_CHAPTER]->(ch)
+                        """,
+                        {"cname": ch.course.name, "id": ch.id},
+                    )
+        except Exception:
+            pass
+
+    def _neo4j_upsert_section(s: Section) -> None:
+        if not neo4j_driver:
+            return
+        try:
+            _neo4j_ensure_constraints()
+            with neo4j_driver.session() as session:
+                session.run(
+                    """
+                    MERGE (s:Section {id: $id})
+                    SET s.name = $name
+                    """,
+                    {"id": s.id, "name": s.name},
+                )
+                if s.chapter:
+                    session.run(
+                        """
+                        MERGE (ch:Chapter {id: $chid})
+                        MERGE (s:Section {id: $id})
+                        MERGE (ch)-[:HAS_SECTION]->(s)
+                        """,
+                        {"chid": s.chapter_id, "id": s.id},
+                    )
+        except Exception:
+            pass
 
     def _neo4j_upsert_kp(kp: KnowledgePoint, course: Optional[Course]) -> None:
         if not neo4j_driver:
@@ -609,31 +756,67 @@ def _create_app() -> Flask:
                             {"course_name": course_name, "id": res.id},
                         )
 
-                # Link to KnowledgePoint if exists
-                kp_name = res.knowledge_point.name if res.knowledge_point else res.knowledge_point_name
-                if kp_name:
-                    session.run(
-                        """
-                        MERGE (k:KnowledgePoint {name: $kp_name})
-                        MERGE (r:Resource {id: $id})
-                        MERGE (k)-[:RELATED_RESOURCE]->(r)
-                        """,
-                        {"kp_name": kp_name, "id": res.id},
-                    )
-
-                # Link to Teachers
-                for rt in res.resource_teachers:
-                    if rt.teacher and rt.teacher.name:
+                # Link to KnowledgePoints (supports multiple)
+                if res.resource_knowledge_points:
+                    for rkp in res.resource_knowledge_points:
+                        kp = rkp.knowledge_point
+                        if not kp:
+                            continue
+                        
+                        # 1. 建立知识点与资源的关联
                         session.run(
                             """
-                            MERGE (t:Teacher {name: $teacher_name})
+                            MERGE (k:KnowledgePoint {name: $kp_name})
                             MERGE (r:Resource {id: $id})
-                            MERGE (t)-[:AUTHORED]->(r)
+                            MERGE (k)-[:RELATED_RESOURCE]->(r)
                             """,
-                            {"teacher_name": rt.teacher.name, "id": res.id},
+                            {"kp_name": kp.name, "id": res.id},
                         )
+
+                        # 2. 跨章节关联逻辑 (Cross-chapter Association)
+                        # 如果知识点的归属（Section/Chapter）与资源的归属不同，则建立关联
+                        # 场景：知识点在第三章，但资源上传到了第五章
+                        if res.section_id:
+                            # 如果资源在小节下，且知识点不在该小节
+                            if kp.section_id != res.section_id:
+                                session.run(
+                                    """
+                                    MERGE (k:KnowledgePoint {name: $kp_name})
+                                    MERGE (s:Section {id: $section_id})
+                                    MERGE (k)-[:ASSOCIATED_WITH]->(s)
+                                    """,
+                                    {"kp_name": kp.name, "section_id": res.section_id}
+                                )
+                        elif res.chapter_id:
+                            # 如果资源在章节下，且知识点不在该章节
+                            if kp.chapter_id != res.chapter_id:
+                                session.run(
+                                    """
+                                    MERGE (k:KnowledgePoint {name: $kp_name})
+                                    MERGE (ch:Chapter {id: $chapter_id})
+                                    MERGE (k)-[:ASSOCIATED_WITH]->(ch)
+                                    """,
+                                    {"kp_name": kp.name, "chapter_id": res.chapter_id}
+                                )
+                
+                # Fallback to single fields if no relations found (compatible with legacy data)
+                else:
+                    kp_name = res.knowledge_point.name if res.knowledge_point else res.knowledge_point_name
+                    if kp_name:
+                        # Split by comma in case it's a concatenated string
+                        kps_to_link = [k.strip() for k in kp_name.split(",") if k.strip()]
+                        for kname in kps_to_link:
+                            session.run(
+                                """
+                                MERGE (k:KnowledgePoint {name: $kp_name})
+                                MERGE (r:Resource {id: $id})
+                                MERGE (k)-[:RELATED_RESOURCE]->(r)
+                                """,
+                                {"kp_name": kname, "id": res.id},
+                            )
         except Exception:
             return
+
 
     def _neo4j_delete_resource(resource_id: int, title: Optional[str]) -> None:
         if not neo4j_driver:
@@ -663,10 +846,6 @@ def _create_app() -> Flask:
         for n in notifications:
             db.delete(n)
 
-        rts = db.execute(select(ResourceTeacher).where(ResourceTeacher.resource_id == rid)).scalars().all()
-        for rt in rts:
-            db.delete(rt)
-
         tags = db.execute(select(ResourceTag).where(ResourceTag.resource_id == rid)).scalars().all()
         for t in tags:
             db.delete(t)
@@ -691,12 +870,78 @@ def _create_app() -> Flask:
             "deleted": {
                 "behaviors": len(behaviors),
                 "notifications": len(notifications),
-                "resource_teachers": len(rts),
                 "tags": len(tags),
                 "resource": 1,
                 "resource_file": removed_file,
             },
         }
+
+
+    # 模拟本地学科词库
+    INITIAL_DISCIPLINE_DICTIONARY = {
+        "计算机", "人工智能", "机器学习", "深度学习", "神经网络", "数据结构", "算法",
+        "操作系统", "计算机网络", "数据库", "软件工程", "程序设计", "编程语言", "微积分",
+        "线性代数", "概率论", "数理统计", "离散数学", "物理", "力学", "热学", "光学",
+        "电磁学", "量子力学", "相对论", "电路", "模拟电子", "数字电子", "嵌入式",
+        "寄存器", "指令寄存器", "程序计数器", "运算器", "控制器", "总线", "存储器",
+        "流水线", "中断", "缓存", "虚拟内存", "逻辑门", "多路复用器", "加法器",
+        "编译原理", "汇编语言", "微程序", "控制单元", "任务书", "练习题", "实验报告",
+        "寄存器组", "通用寄存器", "通用寄存器组", "专用寄存器", "状态寄存器", "变址寄存器", "基址寄存器",
+        "ALU", "算术逻辑单元", "累加器", "数据通路", "时序控制", "控制信号",
+        "IR", "PC", "MAR", "MDR", "CPU", "RAM", "ROM", "I/O", "ISA", "RISC", "CISC"
+    }
+
+    def _analyze_entity_via_llm(word: str, course_name: Optional[str] = None, current_dir: Optional[str] = None, discipline: Optional[str] = None) -> Dict[str, Any]:
+        """
+        使用大模型深度分析实体：
+        1. 是否为专业知识点
+        2. 获取官方全称（归一化）
+        3. 领域相关度
+        """
+        default_res = {"is_knowledge_point": False, "full_name": "", "domain_relevance": 0.0}
+        if not settings.llm_api_key or not word or len(word) < 2:
+            return default_res
+
+        try:
+            prompt = f"""你是一个教学资源管理系统的专家助手。
+请分析词汇“{word}”是否是一个合理的专业教学知识点。
+上下文：
+- 课程名称：{course_name or '未知'}
+- 专业领域：{discipline or '未知'}
+- 当前所属章节/目录：{current_dir or '未知'}
+
+请严格按照以下 JSON 格式返回结果，不要有任何其他解释文字：
+{{
+  "is_knowledge_point": true/false,
+  "full_name": "如果是缩写或简称，请返回官方学术全称；否则返回原词",
+  "domain_relevance": 0.0到1.0之间的浮点数
+}}
+"""
+            headers = {
+                "Authorization": f"Bearer {settings.llm_api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": settings.llm_model,
+                "messages": [
+                    {"role": "system", "content": "你是一个专业的教育领域专家，擅长识别学科知识点并进行实体归一化。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"}
+            }
+
+            resp = requests.post(settings.llm_base_url + "/chat/completions", json=payload, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                # 处理可能的 markdown 格式
+                if content.startswith("```json"):
+                    content = content.split("```json")[1].split("```")[0].strip()
+                return json.loads(content)
+        except Exception as e:
+            print(f"LLM analysis error for '{word}': {e}")
+        
+        return default_res
 
     def _process_resource_pipeline(res: Resource, db: Session) -> None:
         """
@@ -709,8 +954,11 @@ def _create_app() -> Flask:
         import pandas as pd
         import pdfplumber
         from io import BytesIO
+        import traceback
 
+        print(f"[*] Starting pipeline for resource: {res.file_name} (ID: {res.id})")
         if not res.file_path or not os.path.exists(res.file_path):
+            print(f"[!] File path not found: {res.file_path}")
             return
 
         suffix = Path(res.file_name).suffix.lower()
@@ -763,6 +1011,7 @@ def _create_app() -> Flask:
                     with open(res.file_path, "r", encoding="gbk") as f:
                         raw_text = f.read()
         except Exception as e:
+            print(f"[!] Text extraction error: {e}")
             raw_text = f"提取内容失败: {str(e)}"
 
         # --- 步骤 2: 数据清洗与标准化 ---
@@ -781,63 +1030,267 @@ def _create_app() -> Flask:
         # 1. 如果资源未关联知识点，尝试从文件名或内容中抽取关键词作为知识点
         file_base = Path(res.file_name).stem
         if not res.knowledge_point_id:
-            # 使用 TextRank 从文件名提取关键词
-            # 如果文件名较短，jieba.analyse.textrank 可能没有结果，此时回退到整个文件名
-            keywords = jieba.analyse.textrank(file_base, topK=1)
-            kp_name = keywords[0] if keywords else file_base
-            
-            # 进一步清洗：去除常见的“资料”、“讲义”等后缀（如果 TextRank 没能完全去除）
-            common_suffixes = ["讲义", "习题", "课件", "资料", "作业", "复习", "预习", "文档", "表格", "练习"]
-            for sfx in common_suffixes:
-                if kp_name.endswith(sfx) and len(kp_name) > len(sfx):
-                    kp_name = kp_name[:-len(sfx)]
-            
-            kp_name = kp_name.strip()
-            if not kp_name:
-                kp_name = file_base
+            print(f"[*] Identifying entity for: {file_base}")
+            # --- 阶段1: 预处理 (Preprocessing) ---
+            # 1.1 仅剔除日期、版本、括号内容，保留核心文本以维持分词上下文
+            clean_name = re.sub(r"\[.*?\]|（.*?）|\(.*?\)|《|》", "", file_base)
+            clean_name = re.sub(r"\d{4}[-/_]\d{2}([-/_]\d{2})?", "", clean_name)
+            clean_name = re.sub(r"v\d+\.\d+|最新版|修订版|最终版", "", clean_name, flags=re.I)
+            clean_name = clean_name.strip("- _")
 
-            existing_kp = db.execute(
-                select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id).where(KnowledgePoint.name == kp_name)
-            ).scalar_one_or_none()
+            # 1.2 获取黑名单（用于后续过滤，不再预先擦除）
+            try:
+                black_words = db.execute(
+                    select(Blacklist.word).where((Blacklist.course_id == res.course_id) | (Blacklist.course_id.is_(None)))
+                ).scalars().all()
+            except Exception as e:
+                print(f"[!] Error fetching blacklist: {e}")
+                black_words = []
             
-            if not existing_kp:
-                new_kp = KnowledgePoint(name=kp_name, course_id=res.course_id)
-                db.add(new_kp)
-                db.flush()
-                existing_kp = new_kp
-                if neo4j_driver:
-                    _neo4j_upsert_kp(existing_kp, res.course)
+            default_black = ["讲义", "课件", "习题", "实验", "作业", "参考资料", "复习", "预习", "文档", "表格", "练习", "任务书", "副本", "设计与实现", "进行", "利用", "基于", "通过", "关于", "及其", "与", "和", "研究", "分析", "探讨", "介绍", "的使用", "Logisim", "MIPS", "FPGA"]
+            all_black = set(list(black_words) + default_black)
             
-            res.knowledge_point_id = existing_kp.id
-            res.knowledge_point_name = existing_kp.name
+            # --- 阶段2: 分词干预 (Tokenization Tuning) ---
+            whitelist = []
+            course = res.course
+            if course:
+                # 显式加载关联数据
+                db.refresh(course)
+                whitelist.append(course.name)
+                for chap in course.chapters:
+                    whitelist.append(chap.name)
+                    for sec in chap.sections:
+                        whitelist.append(sec.name)
+            
+            # 注入白名单和学科词库到分词器
+            for word in whitelist:
+                if len(word) > 1:
+                    try:
+                        jieba.add_word(word)
+                    except:
+                        pass
+            
+            for word in INITIAL_DISCIPLINE_DICTIONARY:
+                if len(word) > 1:
+                    try:
+                        jieba.add_word(word)
+                    except:
+                        pass
+
+            # --- 阶段3: 实体提取策略 (Extraction Logic) ---
+            candidate_entities = [] # 候选实体列表
+            
+            # 策略A：优先匹配白名单长词
+            sorted_whitelist = sorted([w for w in whitelist if len(w) > 1], key=len, reverse=True)
+            temp_name = clean_name
+            for w in sorted_whitelist:
+                if w in temp_name:
+                    if w not in candidate_entities:
+                        candidate_entities.append(w)
+                    temp_name = temp_name.replace(w, " ") 
+            
+            # 策略B：学术名词与缩写识别 (IR, PC, CPU, 通用寄存器组等)
+            # 强化正则：支持更多缩写和组合词
+            academic_patterns = re.findall(r"\b[A-Z0-9]{2,}\b|[\u4e00-\u9fa5]{2,}(?=[A-Z])|[A-Z]{2,}(?=[\u4e00-\u9fa5])|[\u4e00-\u9fa5]+寄存器组?|[\u4e00-\u9fa5]+计数器|[\u4e00-\u9fa5]+单元|[\u4e00-\u9fa5]+电路", clean_name)
+            for ap in academic_patterns:
+                if ap not in candidate_entities and len(ap) >= 2:
+                    candidate_entities.append(ap)
+
+            # 策略C：规则启发（词性标注与 TextRank）
+            try:
+                words = pseg.cut(clean_name)
+                valid_tags = {'n', 'nz', 'vn', 'nrt'}
+                for w, t in words:
+                    if t in valid_tags and len(w) > 1:
+                        if w not in candidate_entities:
+                            candidate_entities.append(w)
+                
+                # 增加 TextRank 提取关键词
+                keywords = jieba.analyse.textrank(clean_name, topK=5)
+                for kw in keywords:
+                    if kw not in candidate_entities:
+                        candidate_entities.append(kw)
+            except Exception as e:
+                print(f"[!] Tokenization error: {e}")
+            
+            # --- 阶段4: 实体清洗与去噪 (Entity Post-processing) ---
+            extracted_entities = []
+            noise_prefixes = ["进行", "利用", "基于", "通过", "关于", "及", "与", "和", "的", "针对", "研究", "分析", "探讨", "介绍", "的使用"]
+            
+            for entity in candidate_entities:
+                # 1. 剔除黑名单中的词
+                if entity in all_black:
+                    continue
+                
+                # 2. 进一步清洗前后干扰
+                temp_entity = entity.strip("- _")
+                changed = True
+                while changed:
+                    old_temp = temp_entity
+                    for noise in noise_prefixes:
+                        if temp_entity.startswith(noise):
+                            temp_entity = temp_entity[len(noise):]
+                        if temp_entity.endswith(noise):
+                            temp_entity = temp_entity[:-len(noise)]
+                    temp_entity = temp_entity.strip("- _")
+                    changed = (old_temp != temp_entity)
+                
+                # 3. 过滤过短或纯数字/符号的词
+                if len(temp_entity) >= 2 and not re.match(r"^\d+$", temp_entity):
+                    if temp_entity not in extracted_entities:
+                        extracted_entities.append(temp_entity)
+
+            # --- 阶段5: 外部知识库校验 (External Validation) & 图谱关联 ---
+            final_kp_ids = []
+            final_kp_names = []
+            
+            # 获取学科领域作为上下文
+            discipline_name = ""
+            if course:
+                try:
+                    from sqlalchemy.orm import selectinload
+                    stmt = select(Course).where(Course.id == res.course_id).options(
+                        selectinload(Course.course_majors).selectinload(CourseMajor.major)
+                    )
+                    course_with_major = db.execute(stmt).scalar_one_or_none()
+                    if course_with_major and course_with_major.course_majors:
+                        discipline_name = course_with_major.course_majors[0].major.name
+                except Exception: pass
+
+            current_dir_name = ""
+            if res.section_id:
+                sec = db.get(Section, res.section_id)
+                if sec: current_dir_name = sec.name
+            elif res.chapter_id:
+                chap = db.get(Chapter, res.chapter_id)
+                if chap: current_dir_name = chap.name
+
+            for entity in extracted_entities:
+                target_kp_name = entity
+                existing_kp = None
+                
+                # 1. 本地匹配：优先查找已有知识点
+                existing_kp = db.execute(
+                    select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id).where(KnowledgePoint.name == entity)
+                ).scalar_one_or_none()
+
+                if existing_kp:
+                    target_kp_name = existing_kp.name
+                else:
+                    # 2. 快速通行证：检查本地学科词库 (INITIAL_DISCIPLINE_DICTIONARY)
+                    is_discipline_word = entity in INITIAL_DISCIPLINE_DICTIONARY
+                    
+                    if is_discipline_word:
+                        print(f"[*] Entity '{entity}' matched in local discipline dictionary.")
+                        # 本地库命中的直接作为新知识点名称
+                    else:
+                        # 3. 外部知识库验证 (LLM 驱动版)
+                        if settings.llm_api_key:
+                            llm_result = _analyze_entity_via_llm(entity, course.name if course else None, current_dir_name, discipline_name)
+                            
+                            if not llm_result.get("is_knowledge_point"):
+                                # 容错：如果领域相关度很高，即使 is_knowledge_point 为 false 也尝试保留
+                                if llm_result.get("domain_relevance", 0) < 0.6:
+                                    print(f"[*] Entity '{entity}' rejected by LLM. Adding to blacklist.")
+                                    try:
+                                        new_black = Blacklist(word=entity, course_id=res.course_id, reason="LLM 自动识别为非知识点")
+                                        db.add(new_black)
+                                        db.flush()
+                                    except Exception: pass
+                                    continue
+                            
+                            # 实体归一化
+                            full_name = llm_result.get("full_name")
+                            if full_name and len(full_name) >= 2:
+                                target_kp_name = full_name
+                                # 归一化后再次检查是否已存在
+                                existing_kp = db.execute(
+                                    select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id).where(KnowledgePoint.name == target_kp_name)
+                                ).scalar_one_or_none()
+
+                # 4. 关联或创建
+                try:
+                    if not existing_kp:
+                        new_kp = KnowledgePoint(
+                            name=target_kp_name, 
+                            course_id=res.course_id,
+                            chapter_id=res.chapter_id,
+                            section_id=res.section_id
+                        )
+                        db.add(new_kp)
+                        db.flush()
+                        existing_kp = new_kp
+                        print(f"[*] New KP created: {target_kp_name}")
+                    else:
+                        print(f"[*] Reusing existing KP: {target_kp_name} (ID: {existing_kp.id})")
+                    
+                    if existing_kp.id not in final_kp_ids:
+                        final_kp_ids.append(existing_kp.id)
+                        final_kp_names.append(existing_kp.name)
+                        rkp_exists = any(rkp.knowledge_point_id == existing_kp.id for rkp in res.resource_knowledge_points)
+                        if not rkp_exists:
+                            res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=existing_kp.id))
+                except Exception as e:
+                    print(f"[!] Error associating KP '{target_kp_name}': {e}")
+
+            # --- 阶段6: 结果收敛与兜底 ---
+            if final_kp_ids:
+                res.knowledge_point_id = final_kp_ids[0]
+                res.knowledge_point_name = ", ".join(final_kp_names)
+            else:
+                # 最终兜底：关联到当前目录代表的知识点
+                target_kp = None
+                if res.section_id:
+                    target_kp = db.execute(select(KnowledgePoint).where(KnowledgePoint.section_id == res.section_id)).first()
+                if not target_kp and res.chapter_id:
+                    target_kp = db.execute(select(KnowledgePoint).where(KnowledgePoint.chapter_id == res.chapter_id, KnowledgePoint.section_id.is_(None))).first()
+                
+                if target_kp:
+                    # 处理 RowProxy 情况
+                    kp_obj = target_kp[0] if isinstance(target_kp, tuple) else target_kp
+                    res.knowledge_point_id = kp_obj.id
+                    res.knowledge_point_name = kp_obj.name
+                    exists = any(rkp.knowledge_point_id == kp_obj.id for rkp in res.resource_knowledge_points)
+                    if not exists:
+                        res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=kp_obj.id))
+                elif course:
+                    # 如果实在找不到，显示目录名称或课程名称
+                    res.knowledge_point_name = current_dir_name or course.name
 
         # 2. 实体识别 (NER)：识别文中提及的其他已有知识点
-        all_kps = db.execute(
-            select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id)
-        ).scalars().all()
+        try:
+            all_kps = db.execute(
+                select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id)
+            ).scalars().all()
 
-        # 3. 关系抽取 (RE)：建立 MENTIONS 关系并同步到 Neo4j
-        for kp in all_kps:
-            # 如果文中提及了其他知识点，建立关联
-            if kp.name in cleaned_text and kp.name != res.knowledge_point_name:
-                if neo4j_driver:
-                    try:
-                        with neo4j_driver.session() as session:
-                            session.run(
-                                """
-                                MATCH (k1:KnowledgePoint {name: $kp1})
-                                MATCH (k2:KnowledgePoint {name: $kp2})
-                                MERGE (k1)-[r:MENTIONS]->(k2)
-                                SET r.source_resource = $res_title
-                                """,
-                                {"kp1": res.knowledge_point_name, "kp2": kp.name, "res_title": res.title}
-                            )
-                    except Exception:
-                        pass
-                
-                # 为资源打上对应的知识点标签
-                if kp.name not in [t.tag for t in res.tags]:
-                    res.tags.append(ResourceTag(tag=kp.name))
+            # 3. 关系抽取 (RE)：建立 MENTIONS 关系并同步到 Neo4j
+            # 注意：上传阶段不再直接同步到 Neo4j，等待管理员审核通过后同步
+            for kp in all_kps:
+                # 如果文中提及了其他知识点，建立关联
+                if kp.name in cleaned_text and kp.name != res.knowledge_point_name:
+                    # if neo4j_driver:
+                    #     try:
+                    #         with neo4j_driver.session() as session:
+                    #             session.run(
+                    #                 """
+                    #                 MATCH (k1:KnowledgePoint {name: $kp1})
+                    #                 MATCH (k2:KnowledgePoint {name: $kp2})
+                    #                 MERGE (k1)-[r:MENTIONS]->(k2)
+                    #                 SET r.source_resource = $res_title
+                    #                 """,
+                    #                 {"kp1": res.knowledge_point_name, "kp2": kp.name, "res_title": res.title}
+                    #             )
+                    #     except Exception:
+                    #         pass
+                    
+                    # 为资源打上对应的知识点标签
+                    if kp.name not in [t.tag for t in res.tags]:
+                        res.tags.append(ResourceTag(tag=kp.name))
+        except Exception as e:
+            print(f"[!] NER/RE error: {e}")
+            traceback.print_exc()
+        
+        print(f"[*] Pipeline finished for: {res.file_name}")
 
     def _neo4j_delete_course(course_name: str) -> None:
         if not neo4j_driver:
@@ -866,11 +1319,44 @@ def _create_app() -> Flask:
         _ensure_schema(engine)
         with SessionLocal() as db:
             _seed_rbac(db)
+            _seed_majors(db)
             _backfill_resource_refs(db)
             users = db.execute(select(User)).scalars().all()
             for u in users:
                 _ensure_user_profiles(db, u, [r.name for r in (u.roles or [])])
             db.commit()
+
+    def _seed_majors(db: Session) -> None:
+        # Seed Departments
+        depts_data = ["计算机学院", "数学学院", "外国语学院", "人工智能学院"]
+        dept_map = {}
+        for d_name in depts_data:
+            existing = db.execute(select(Department).where(Department.name == d_name)).scalar_one_or_none()
+            if not existing:
+                existing = Department(name=d_name)
+                db.add(existing)
+                db.flush()
+            dept_map[d_name] = existing.id
+
+        # Seed Majors with department linkage
+        majors_data = [
+            ("计算机科学与技术", "计算机学院"),
+            ("软件工程", "计算机学院"),
+            ("人工智能", "人工智能学院"),
+            ("数据科学", "数学学院"),
+            ("网络安全", "计算机学院"),
+            ("应用数学", "数学学院"),
+            ("英语", "外国语学院")
+        ]
+        for m_name, d_name in majors_data:
+            existing = db.execute(select(Major).where(Major.name == m_name)).scalar_one_or_none()
+            if not existing:
+                db.add(Major(name=m_name, department_id=dept_map.get(d_name)))
+            else:
+                existing.department_id = dept_map.get(d_name)
+        db.commit()
+
+
 
     def _ensure_schema(engine_) -> None:
         insp = inspect(engine_)
@@ -887,6 +1373,8 @@ def _create_app() -> Flask:
                 to_add.append(("audited_by", "INTEGER"))
             if "audited_at" not in cols:
                 to_add.append(("audited_at", "DATETIME"))
+            if "suggestion" not in cols:
+                to_add.append(("suggestion", "JSON"))
             if to_add:
                 with engine_.connect() as conn:
                     for name, sql_type in to_add:
@@ -917,32 +1405,45 @@ def _create_app() -> Flask:
                         conn.exec_driver_sql(f"ALTER TABLE teachers ADD COLUMN {name} {sql_type}")
                     conn.commit()
 
+        if "departments" not in insp.get_table_names():
+            Base.metadata.tables["departments"].create(engine_, checkfirst=True)
+        if "blacklist" not in insp.get_table_names():
+            Base.metadata.tables["blacklist"].create(engine_, checkfirst=True)
+
         if "resource_teachers" not in insp.get_table_names():
             Base.metadata.tables["resource_teachers"].create(engine_, checkfirst=True)
-        if "students" not in insp.get_table_names():
-            Base.metadata.tables["students"].create(engine_, checkfirst=True)
-        if "deans" not in insp.get_table_names():
-            Base.metadata.tables["deans"].create(engine_, checkfirst=True)
-        if "course_teachers" not in insp.get_table_names():
-            Base.metadata.tables["course_teachers"].create(engine_, checkfirst=True)
-        if "course_departments" not in insp.get_table_names():
-            Base.metadata.tables["course_departments"].create(engine_, checkfirst=True)
-            # Migration: if courses has department, fill course_departments
+
+        if "resource_knowledge_points" not in insp.get_table_names():
+            Base.metadata.tables["resource_knowledge_points"].create(engine_, checkfirst=True)
+        if "majors" not in insp.get_table_names():
+            Base.metadata.tables["majors"].create(engine_, checkfirst=True)
+        else:
+            cols = {c["name"] for c in insp.get_columns("majors")}
+            if "department_id" not in cols:
+                with engine_.connect() as conn:
+                    conn.exec_driver_sql("ALTER TABLE majors ADD COLUMN department_id INTEGER REFERENCES departments(id)")
+                    conn.commit()
+
+        if "course_majors" not in insp.get_table_names():
+            Base.metadata.tables["course_majors"].create(engine_, checkfirst=True)
+            # Migration: if courses has department, or course_departments exists, try to fill course_majors
             with engine_.connect() as conn:
-                existing_depts = conn.exec_driver_sql("SELECT id, department FROM courses WHERE department IS NOT NULL").fetchall()
-                for row in existing_depts:
-                    cid, dept_str = row
-                    # Handle comma separated if any, otherwise single
-                    depts = [d.strip() for d in str(dept_str).replace("，", ",").split(",") if d.strip()]
-                    for d in depts:
-                        try:
-                            conn.exec_driver_sql(
-                                "INSERT INTO course_departments (course_id, department) VALUES (%s, %s)",
-                                (cid, d)
-                            )
-                        except Exception:
-                            pass
+                # 尝试从旧表迁移数据
+                if "course_departments" in insp.get_table_names():
+                    old_data = conn.exec_driver_sql("SELECT course_id, department FROM course_departments").fetchall()
+                    for cid, dept_name in old_data:
+                        # 先确保专业存在
+                        conn.exec_driver_sql("INSERT OR IGNORE INTO majors (name) VALUES (%s)", (dept_name,))
+                        mid = conn.exec_driver_sql("SELECT id FROM majors WHERE name = %s", (dept_name,)).scalar()
+                        if mid:
+                            conn.exec_driver_sql("INSERT OR IGNORE INTO course_majors (course_id, major_id) VALUES (%s, %s)", (cid, mid))
                 conn.commit()
+
+        if "course_departments" in insp.get_table_names():
+            with engine_.connect() as conn:
+                conn.exec_driver_sql("DROP TABLE course_departments")
+                conn.commit()
+
 
         if "notifications" not in insp.get_table_names():
             Base.metadata.tables["notifications"].create(engine_, checkfirst=True)
@@ -1587,7 +2088,93 @@ def _create_app() -> Flask:
         }
         return stats
 
+    @app.post("/api/admin/graph/sync")
+    def sync_graph_full():
+        """
+        全量同步 Neo4j 数据：
+        1. 清理 Neo4j 中的所有节点和关系
+        2. 从 MySQL 重新加载所有数据并同步到 Neo4j
+        """
+        if not neo4j_driver:
+            return jsonify({"error": "Neo4j not configured"}), 500
+        
+        try:
+            with neo4j_driver.session() as session:
+                # 危险操作：删除 Neo4j 中的所有内容
+                session.run("MATCH (n) DETACH DELETE n")
+            
+            _neo4j_ensure_constraints()
+            
+            counts = {"departments": 0, "majors": 0, "courses": 0, "chapters": 0, "sections": 0, "knowledge_points": 0, "resources": 0, "assignments": 0}
+            
+            with SessionLocal() as db:
+                # 同步院系
+                depts = db.execute(select(Department)).scalars().all()
+                with neo4j_driver.session() as session:
+                    for d in depts:
+                        session.run("MERGE (dept:Department {name: $name})", {"name": d.name})
+                        counts["departments"] += 1
+                
+                # 同步专业
+                majors = db.execute(select(Major)).scalars().all()
+                with neo4j_driver.session() as session:
+                    for m in majors:
+                        session.run("MERGE (maj:Major {name: $name})", {"name": m.name})
+                        counts["majors"] += 1
+                        if m.department:
+                            session.run(
+                                """
+                                MERGE (maj:Major {name: $mname})
+                                MERGE (dept:Department {name: $dname})
+                                MERGE (maj)-[:BELONGS_TO_DEPT]->(dept)
+                                """,
+                                {"mname": m.name, "dname": m.department.name}
+                            )
+                
+                # 同步课程
+                courses = db.execute(select(Course)).scalars().all()
+                for c in courses:
+                    _neo4j_upsert_course(c)
+                    counts["courses"] += 1
+                
+                # 同步章节
+                chapters = db.execute(select(Chapter)).scalars().all()
+                for ch in chapters:
+                    _neo4j_upsert_chapter(ch)
+                    counts["chapters"] += 1
+                
+                # 同步小节
+                sections = db.execute(select(Section)).scalars().all()
+                for s in sections:
+                    _neo4j_upsert_section(s)
+                    counts["sections"] += 1
+
+                # 同步教学分配 (教师与课程的联系)
+                assignments = db.execute(select(CourseTeacher)).scalars().all()
+                for a in assignments:
+                    _neo4j_upsert_course_teacher(a.course_id, a.teacher_id)
+                    counts["assignments"] += 1
+                
+                # 同步知识点
+                kps = db.execute(select(KnowledgePoint)).scalars().all()
+                for k in kps:
+                    _neo4j_upsert_kp(k, k.course)
+                    counts["knowledge_points"] += 1
+                
+                # 同步资源
+                resources = db.execute(select(Resource)).scalars().all()
+                for r in resources:
+                    _neo4j_upsert_resource(r)
+                    counts["resources"] += 1
+            
+            return jsonify({"ok": True, "message": "Full graph sync completed", "counts": counts})
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
     @app.after_request
+
     def _log_request(resp):
         if request.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             try:
@@ -1619,6 +2206,7 @@ def _create_app() -> Flask:
     @app.get("/api/courses")
     def list_courses():
         q = (request.args.get("q") or "").strip()
+        major_id = _parse_int(request.args.get("major_id"))
         with SessionLocal() as db:
             user = get_current_user(db)
             stmt = select(Course).order_by(Course.created_at.desc())
@@ -1626,6 +2214,10 @@ def _create_app() -> Flask:
             if q:
                 like = f"%{q}%"
                 stmt = stmt.where((Course.name.like(like)) | (Course.code.like(like)) | (Course.description.like(like)))
+            
+            if major_id:
+                stmt = stmt.join(CourseMajor).where(CourseMajor.major_id == major_id)
+
             items = db.execute(stmt).scalars().all()
             return jsonify(
                 {
@@ -1634,7 +2226,7 @@ def _create_app() -> Flask:
                             "id": c.id,
                             "name": c.name,
                             "code": c.code,
-                            "department": ", ".join([cd.department for cd in c.course_departments]) if c.course_departments else c.department,
+                            "majors": [cm.major.name for cm in c.course_majors if cm.major],
                             "description": c.description,
                             "created_at": c.created_at.isoformat(),
                         }
@@ -1643,45 +2235,60 @@ def _create_app() -> Flask:
                 }
             )
 
+    @app.get("/api/departments")
+    def list_departments():
+        with SessionLocal() as db:
+            items = db.execute(select(Department).order_by(Department.name)).scalars().all()
+            return jsonify({"items": [{"id": d.id, "name": d.name} for d in items]})
+
+    @app.get("/api/majors")
+    def list_majors():
+        dept_id = _parse_int(request.args.get("department_id"))
+        with SessionLocal() as db:
+            stmt = select(Major).order_by(Major.name)
+            if dept_id:
+                stmt = stmt.where(Major.department_id == dept_id)
+            items = db.execute(stmt).scalars().all()
+            return jsonify({"items": [{"id": m.id, "name": m.name, "department_id": m.department_id} for m in items]})
+
+
     @app.post("/api/courses")
     def create_course():
         data = _json()
         name = str(data.get("name", "")).strip()
         code = (data.get("code") or "").strip() or None
-        department_str = (data.get("department") or "").strip() or None
+        major_ids = data.get("major_ids") or []
         description = (data.get("description") or "").strip() or None
         if not name:
             raise ApiError("BAD_REQUEST", "name required", 400)
         
-        depts = [d.strip() for d in str(department_str).replace("，", ",").split(",") if d.strip()] if department_str else []
-
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"dean"})
             existing = db.execute(select(Course).where(Course.name == name)).scalar_one_or_none()
             if existing:
                 existing.code = code
-                existing.department = department_str # maintain for single view
                 existing.description = description
                 
-                # Update course_departments
-                existing.course_departments.clear()
-                for d in depts:
-                    existing.course_departments.append(CourseDepartment(department=d))
+                # Update course_majors
+                existing.course_majors.clear()
+                for mid in major_ids:
+                    existing.course_majors.append(CourseMajor(major_id=mid))
                 
                 db.commit()
                 _neo4j_upsert_course(existing)
-                return jsonify({"course": {"id": existing.id, "name": existing.name, "code": existing.code, "department": department_str, "description": existing.description}})
+                return jsonify({"course": {"id": existing.id, "name": existing.name, "code": existing.code, "description": existing.description}})
             
-            c = Course(name=name, code=code, department=department_str, description=description)
-            for d in depts:
-                c.course_departments.append(CourseDepartment(department=d))
+            c = Course(name=name, code=code, description=description)
+            for mid in major_ids:
+                c.course_majors.append(CourseMajor(major_id=mid))
             
             db.add(c)
             db.commit()
             db.refresh(c)
             _neo4j_upsert_course(c)
-            return jsonify({"course": {"id": c.id, "name": c.name, "code": c.code, "department": department_str, "description": c.description}})
+            return jsonify({"course": {"id": c.id, "name": c.name, "code": c.code, "description": c.description}})
+
     
     @app.delete("/api/courses/<int:course_id>")
     def delete_course(course_id: int):
@@ -1901,6 +2508,8 @@ def _create_app() -> Flask:
                 if not t:
                     continue
                 db.add(CourseTeacher(course_id=course_id, teacher_id=tid, class_name=cname))
+                _neo4j_upsert_course_teacher(course_id, tid)
+
             
             db.commit()
             return jsonify({"ok": True})
@@ -2800,100 +3409,242 @@ def _create_app() -> Flask:
             db.refresh(res)
             return jsonify({"resource": _resource_dto(res)})
 
+    @app.post("/api/resources/batch-approve-all")
+    def batch_approve_all_resources():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"dean"})
+
+            # Find all pending resources
+            pending_resources = db.execute(
+                select(Resource).where(Resource.status == "pending")
+            ).scalars().all()
+
+            if not pending_resources:
+                return jsonify({"ok": True, "count": 0})
+
+            now = dt.datetime.utcnow()
+            count = 0
+            for res in pending_resources:
+                res.status = "approved"
+                res.audited_by = user.id
+                res.audited_at = now
+                
+                # Sync with Neo4j
+                # 审核通过时，同步关联的所有知识点到 Neo4j
+                for rkp in res.resource_knowledge_points:
+                    if rkp.knowledge_point:
+                        _neo4j_upsert_kp(rkp.knowledge_point, res.course)
+                # 同步资源节点及其与知识点的关系
+                _neo4j_upsert_resource(res)
+                
+                # Notify teacher
+                db.add(Notification(
+                    user_id=res.created_by,
+                    title="资源审核结果 (一键通过)",
+                    content=f"您的资源《{res.title}》已通过系统一键审核通过。",
+                    type="audit_result",
+                    related_id=res.id
+                ))
+                count += 1
+
+            db.commit()
+            return jsonify({"ok": True, "count": count})
+
     @app.post("/api/resources/batch-upload")
     def batch_upload_resources():
         with SessionLocal() as db:
+            try:
+                user = require_auth(db)
+                require_roles(user, {"teacher"})
+
+                course_id = _parse_int(request.form.get("course_id"))
+                chapter_id = _parse_int(request.form.get("chapter_id"))
+                section_id = _parse_int(request.form.get("section_id"))
+                
+                print(f"[*] Batch upload request: course_id={course_id}, chapter_id={chapter_id}, section_id={section_id}")
+                
+                if course_id is None:
+                    raise ApiError("BAD_REQUEST", "course_id is required", 400)
+
+                course_obj = db.get(Course, course_id)
+                if not course_obj:
+                    raise ApiError("NOT_FOUND", "course not found", 404)
+
+                chapter_obj = None
+                section_obj = None
+
+                if section_id:
+                    section_obj = db.get(Section, section_id)
+                    if not section_obj:
+                        raise ApiError("NOT_FOUND", "section not found", 404)
+                    chapter_obj = db.get(Chapter, section_obj.chapter_id)
+                    if not chapter_obj or chapter_obj.course_id != course_id:
+                        raise ApiError("FORBIDDEN", "section does not belong to this course", 403)
+                elif chapter_id:
+                    chapter_obj = db.get(Chapter, chapter_id)
+                    if not chapter_obj or chapter_obj.course_id != course_id:
+                        raise ApiError("NOT_FOUND", "chapter not found or does not belong to this course", 404)
+
+                trow = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
+                if not trow:
+                    raise ApiError("FORBIDDEN", "teacher profile not found", 403)
+
+                files = request.files.getlist("files")
+                print(f"[*] Files received: {len(files)}")
+                if not files:
+                    raise ApiError("BAD_REQUEST", "no files uploaded", 400)
+
+                results = []
+                allowed_extensions = {".docx", ".pdf", ".pptx", ".xlsx", ".txt"}
+                for f in files:
+                    # 使用 savepoint (nested transaction) 确保单个文件失败不影响整个批次
+                    sp = db.begin_nested()
+                    try:
+                        original_name = (f.filename or "upload").strip()
+                        print(f"[*] Processing file: {original_name}")
+                        suffix = Path(original_name).suffix.lower()
+                        if suffix not in allowed_extensions:
+                            results.append({"filename": original_name, "status": "error", "message": f"仅支持上传 {', '.join([ext.lstrip('.') for ext in allowed_extensions])} 格式文件"})
+                            sp.rollback()
+                            continue
+
+                        file_id = str(uuid.uuid4())
+                        safe_name = f"{file_id}{suffix}"
+                        dest_path = settings.upload_dir / safe_name
+                        f.save(str(dest_path))
+                        print(f"[*] Saved to: {dest_path}")
+
+                        res = Resource(
+                            title=Path(original_name).stem,
+                            file_name=original_name,
+                            file_path=str(dest_path),
+                            file_type=suffix.lstrip("."),
+                            file_size=dest_path.stat().st_size if dest_path.exists() else None,
+                            course_id=course_obj.id,
+                            chapter_id=chapter_obj.id if chapter_obj else None,
+                            section_id=section_obj.id if section_obj else None,
+                            course_name=course_obj.name,
+                            chapter_name=chapter_obj.name if chapter_obj else None,
+                            section_name=section_obj.name if section_obj else None,
+                            created_by=user.id,
+                            status="pending",
+                        )
+                        db.add(res)
+                        db.flush()
+
+                        _process_resource_pipeline(res, db)
+
+                        res.resource_teachers.append(ResourceTeacher(teacher_id=trow.id))
+                        results.append({
+                            "filename": original_name,
+                            "status": "success",
+                            "kp": res.knowledge_point_name,
+                            "chapter": res.chapter_name,
+                            "section": res.section_name,
+                            "suggestion": res.suggestion,
+                            "id": res.id
+                        })
+                        sp.commit()
+                    except Exception as fe:
+                        sp.rollback()
+                        print(f"[!] Error processing individual file {f.filename}: {fe}")
+                        traceback.print_exc()
+                        results.append({"filename": f.filename, "status": "error", "message": str(fe)})
+
+                deans = db.execute(select(User).join(User.roles).where(Role.name == "dean")).scalars().all()
+                for dean in deans:
+                    db.add(Notification(
+                        user_id=dean.id,
+                        title="批量资源待审核",
+                        content=f"教师 {user.username} 批量上传了 {len(files)} 份资源，请及时审核。",
+                        type="audit_pending"
+                    ))
+
+                db.commit()
+                return jsonify({"results": results})
+            except ApiError as e:
+                raise e
+            except Exception as e:
+                print(f"[!] Critical error in batch_upload_resources: {e}")
+                traceback.print_exc()
+                raise ApiError("INTERNAL_ERROR", f"批量处理过程中发生异常: {str(e)}", 500)
+
+    @app.post("/api/resources/<int:resource_id>/apply-suggestion")
+    def apply_resource_suggestion(resource_id: int):
+        with SessionLocal() as db:
             user = require_auth(db)
-            require_roles(user, {"teacher"})
+            require_roles(user, {"teacher", "dean"})
 
-            course_id = _parse_int(request.form.get("course_id"))
-            chapter_id = _parse_int(request.form.get("chapter_id"))
-            section_id = _parse_int(request.form.get("section_id"))
-            if course_id is None:
-                raise ApiError("BAD_REQUEST", "course_id is required", 400)
+            res = db.get(Resource, resource_id)
+            if not res:
+                raise ApiError("NOT_FOUND", "resource not found", 404)
+            
+            if not res.suggestion:
+                raise ApiError("BAD_REQUEST", "no suggestion available for this resource", 400)
+            
+            s = res.suggestion
+            target_id = s.get("target_id")
+            target_type = s.get("target_type")
 
-            course_obj = db.get(Course, course_id)
-            if not course_obj:
-                raise ApiError("NOT_FOUND", "course not found", 404)
-
-            chapter_obj = None
-            section_obj = None
-
-            if section_id:
-                section_obj = db.get(Section, section_id)
-                if not section_obj:
-                    raise ApiError("NOT_FOUND", "section not found", 404)
-                chapter_obj = db.get(Chapter, section_obj.chapter_id)
-                if not chapter_obj or chapter_obj.course_id != course_id:
-                    raise ApiError("FORBIDDEN", "section does not belong to this course", 403)
-            elif chapter_id:
-                chapter_obj = db.get(Chapter, chapter_id)
-                if not chapter_obj or chapter_obj.course_id != course_id:
-                    raise ApiError("NOT_FOUND", "chapter not found or does not belong to this course", 404)
-
-            trow = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
-            if not trow:
-                raise ApiError("FORBIDDEN", "teacher profile not found", 403)
-
-            files = request.files.getlist("files")
-            if not files:
-                raise ApiError("BAD_REQUEST", "no files uploaded", 400)
-
-            results = []
-            allowed_extensions = {".docx", ".pdf", ".pptx", ".xlsx", ".txt"}
-            for f in files:
-                original_name = (f.filename or "upload").strip()
-                suffix = Path(original_name).suffix.lower()
-                if suffix not in allowed_extensions:
-                    results.append({"filename": original_name, "status": "error", "message": f"仅支持上传 {', '.join([ext.lstrip('.') for ext in allowed_extensions])} 格式文件"})
-                    continue
-
-                file_id = str(uuid.uuid4())
-                safe_name = f"{file_id}{suffix}"
-                dest_path = settings.upload_dir / safe_name
-                f.save(dest_path)
-
-                res = Resource(
-                    title=Path(original_name).stem,
-                    file_name=original_name,
-                    file_path=str(dest_path),
-                    file_type=suffix.lstrip("."),
-                    file_size=dest_path.stat().st_size if dest_path.exists() else None,
-                    course_id=course_obj.id,
-                    chapter_id=chapter_obj.id if chapter_obj else None,
-                    section_id=section_obj.id if section_obj else None,
-                    course_name=course_obj.name,
-                    chapter_name=chapter_obj.name if chapter_obj else None,
-                    section_name=section_obj.name if section_obj else None,
-                    created_by=user.id,
-                    status="pending",
-                )
-                db.add(res)
-                db.flush()
-
-                _process_resource_pipeline(res, db)
-
-                res.resource_teachers.append(ResourceTeacher(teacher_id=trow.id))
-                results.append({
-                    "filename": original_name,
-                    "status": "success",
-                    "kp": res.knowledge_point_name,
-                    "chapter": res.chapter_name,
-                    "section": res.section_name,
-                    "id": res.id
-                })
-
-            deans = db.execute(select(User).join(User.roles).where(Role.name == "dean")).scalars().all()
-            for dean in deans:
-                db.add(Notification(
-                    user_id=dean.id,
-                    title="批量资源待审核",
-                    content=f"教师 {user.username} 批量上传了 {len(files)} 份资源，请及时审核。",
-                    type="audit_pending"
-                ))
-
+            if target_type == "course":
+                res.chapter_id = None
+                res.section_id = None
+                res.chapter_name = None
+                res.section_name = None
+            elif target_type == "chapter":
+                chap = db.get(Chapter, target_id)
+                if chap:
+                    res.chapter_id = chap.id
+                    res.chapter_name = chap.name
+                    res.section_id = None
+                    res.section_name = None
+            elif target_type == "section":
+                sec = db.get(Section, target_id)
+                if sec:
+                    res.section_id = sec.id
+                    res.section_name = sec.name
+                    res.chapter_id = sec.chapter_id
+                    res.chapter_name = sec.chapter.name if sec.chapter else None
+            
+            # 清除建议
+            res.suggestion = None
+            
+            # 同步更新 Neo4j
+            if neo4j_driver:
+                _neo4j_upsert_resource(res)
+                
             db.commit()
-            return jsonify({"results": results})
+            return jsonify({"ok": True, "message": "已成功移动资源到建议位置"})
+
+    @app.post("/api/blacklist")
+    def add_to_blacklist():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"teacher", "dean"})
+            
+            data = request.json or {}
+            word = data.get("word", "").strip()
+            course_id = _parse_int(data.get("course_id"))
+            reason = data.get("reason", "教师反馈")
+            
+            if not word:
+                raise ApiError("BAD_REQUEST", "word is required", 400)
+                
+            # 检查是否已存在
+            existing = db.execute(
+                select(Blacklist).where(Blacklist.word == word).where(Blacklist.course_id == course_id)
+            ).scalar_one_or_none()
+            
+            if not existing:
+                new_entry = Blacklist(word=word, course_id=course_id, reason=reason)
+                db.add(new_entry)
+                
+                # 如果当前有正在处理的资源关联了该词，可以在此处触发重新处理（可选）
+                
+                db.commit()
+            
+            return jsonify({"ok": True, "message": f"已将 '{word}' 加入黑名单"})
 
     @app.post("/api/catalog/import")
     def import_catalog():
@@ -3199,6 +3950,11 @@ def _create_app() -> Flask:
             res.audited_at = dt.datetime.utcnow()
 
             if res.status == "approved":
+                # 审核通过时，同步关联的所有知识点到 Neo4j
+                for rkp in res.resource_knowledge_points:
+                    if rkp.knowledge_point:
+                        _neo4j_upsert_kp(rkp.knowledge_point, res.course)
+                # 同步资源节点及其与知识点的关系
                 _neo4j_upsert_resource(res)
 
             # Notify teacher
@@ -3392,9 +4148,9 @@ def _create_app() -> Flask:
     @app.get("/api/graph/overview")
     def graph_overview():
         course = (request.args.get("course") or "").strip() or None
-        level = (request.args.get("level") or "").strip().lower() or "full"
-        if level not in {"full", "courses"}:
-            level = "full"
+        level = (request.args.get("level") or "").strip().lower() or "departments"
+        if level not in {"full", "courses", "departments"}:
+            level = "departments"
         with SessionLocal() as db:
             current = get_current_user(db)
             
@@ -3827,6 +4583,95 @@ def _create_app() -> Flask:
             db.refresh(new_user)
             return jsonify({"user": _user_admin_dto(new_user, db)})
 
+    @app.post("/api/admin/users/bulk-import")
+    def admin_bulk_import_users():
+        if 'file' not in request.files:
+            raise ApiError("BAD_REQUEST", "no file uploaded", 400)
+        
+        file = request.files['file']
+        if not file or not file.filename:
+            raise ApiError("BAD_REQUEST", "empty file", 400)
+        
+        import pandas as pd
+        import io
+
+        try:
+            if file.filename.endswith('.csv'):
+                df = pd.read_csv(io.BytesIO(file.read()))
+            elif file.filename.endswith(('.xls', '.xlsx')):
+                df = pd.read_excel(io.BytesIO(file.read()))
+            else:
+                raise ApiError("BAD_REQUEST", "unsupported file format, use CSV or Excel", 400)
+        except Exception as e:
+            raise ApiError("BAD_REQUEST", f"failed to parse file: {str(e)}", 400)
+
+        # Expected columns: username, password, roles (comma separated), class_name (optional)
+        # Validate columns
+        required_cols = {'username', 'password', 'roles'}
+        if not required_cols.issubset(df.columns):
+            raise ApiError("BAD_REQUEST", f"missing required columns: {required_cols - set(df.columns)}", 400)
+
+        results = {"success": 0, "failed": 0, "errors": []}
+        
+        with SessionLocal() as db:
+            admin = require_auth(db)
+            require_roles(admin, {"admin", "dean"})
+            admin_roles = {r.name for r in admin.roles}
+            is_dean = ("dean" in admin_roles) and ("admin" not in admin_roles)
+
+            role_cache = {r.name: r for r in db.execute(select(Role)).scalars().all()}
+
+            for index, row in df.iterrows():
+                try:
+                    username = str(row['username']).strip()
+                    password = str(row['password']).strip()
+                    roles_str = str(row['roles']).strip()
+                    class_name = str(row.get('class_name', '')).strip() if 'class_name' in df.columns else None
+
+                    if not username or not password or not roles_str:
+                        raise ValueError("username, password, and roles are required")
+
+                    roles_in = [r.strip() for r in roles_str.replace('，', ',').split(',') if r.strip()]
+                    
+                    if is_dean:
+                        if set(roles_in).difference({"teacher", "student"}):
+                            raise ValueError(f"dean can only create teacher or student accounts (row {index+2})")
+
+                    # Check if user exists
+                    existing = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
+                    if existing:
+                        raise ValueError(f"username '{username}' already exists")
+
+                    # Create user
+                    new_user = User(
+                        username=username,
+                        password_hash=generate_password_hash(password),
+                        is_active=True
+                    )
+                    db.add(new_user)
+                    db.flush()
+
+                    for rname in roles_in:
+                        if rname not in role_cache:
+                            raise ValueError(f"invalid role: {rname}")
+                        new_user.roles.append(role_cache[rname])
+                    
+                    _ensure_user_profiles(db, new_user, roles_in)
+                    
+                    if "student" in roles_in and class_name:
+                        s = db.execute(select(Student).where(Student.user_id == new_user.id)).scalar_one_or_none()
+                        if s:
+                            s.class_name = class_name
+                    
+                    results["success"] += 1
+                except Exception as e:
+                    results["failed"] += 1
+                    results["errors"].append(f"Row {index+2}: {str(e)}")
+            
+            db.commit()
+
+        return jsonify(results)
+
     @app.patch("/api/admin/users/<int:user_id>")
     def admin_update_user(user_id: int):
         data = _json()
@@ -4151,6 +4996,16 @@ def _resource_dto(r: Resource) -> Dict[str, Any]:
     chapter_label = r.chapter.name if r.chapter else r.chapter_name
     section_label = r.section.name if r.section else r.section_name
     kp_label = r.knowledge_point.name if r.knowledge_point else r.knowledge_point_name
+    kps = []
+    if r.resource_knowledge_points:
+        for rkp in r.resource_knowledge_points:
+            if rkp.knowledge_point:
+                kps.append({"id": rkp.knowledge_point.id, "name": rkp.knowledge_point.name})
+    if not kps and kp_label:
+        # 兼容旧逻辑或冗余字段
+        for name in [n.strip() for n in kp_label.split(",") if n.strip()]:
+            kps.append({"id": r.knowledge_point_id, "name": name})
+
     teachers = []
     for rt in getattr(r, "resource_teachers", []) or []:
         if rt.teacher:
@@ -4170,18 +5025,29 @@ def _resource_dto(r: Resource) -> Dict[str, Any]:
         "chapter": chapter_label,
         "section": section_label,
         "knowledge_point": kp_label,
+        "knowledge_points": kps,
         "teachers": teachers,
         "status": r.status,
         "audit_comment": r.audit_comment,
         "audited_by": r.audited_by,
         "audited_at": r.audited_at.isoformat() if r.audited_at else None,
         "tags": [t.tag for t in r.tags],
+        "suggestion": r.suggestion,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
 
 
 def _neo4j_overview(driver, course: Optional[str], level: str) -> Dict[str, Any]:
+    if level == "departments":
+        nodes: Dict[str, Dict[str, Any]] = {}
+        with driver.session() as session:
+            records = session.run("MATCH (d:Department) RETURN d.name as name").data()
+        for rec in records:
+            name = rec["name"]
+            nodes[f"dept:{name}"] = {"id": f"dept:{name}", "label": name, "type": "department"}
+        return {"nodes": list(nodes.values()), "links": [], "source": "neo4j"}
+
     if level == "courses":
         nodes: Dict[str, Dict[str, Any]] = {}
         links: List[Dict[str, Any]] = []
@@ -4218,14 +5084,17 @@ def _neo4j_overview(driver, course: Optional[str], level: str) -> Dict[str, Any]
         query = """
         MATCH (c:Course)
         WHERE ($course IS NULL OR c.name = $course)
-        OPTIONAL MATCH (c)-[:BELONGS_TO_DEPT]->(d:Department)
+        OPTIONAL MATCH (c)-[:BELONGS_TO_MAJOR]->(m:Major)
+        OPTIONAL MATCH (m)-[:BELONGS_TO_DEPT]->(d:Department)
+        OPTIONAL MATCH (t:Teacher)-[:TEACHES]->(c)
         OPTIONAL MATCH (c)-[:HAS_CHAPTER]->(ch:Chapter)
         OPTIONAL MATCH (ch)-[:HAS_SECTION]->(s:Section)
         OPTIONAL MATCH (s)-[:HAS_KP]->(k:KnowledgePoint)
         OPTIONAL MATCH (c)-[:HAS_KP]->(k2:KnowledgePoint)
         OPTIONAL MATCH (k)-[:RELATED_RESOURCE]->(r:Resource)
         OPTIONAL MATCH (k2)-[:RELATED_RESOURCE]->(r2:Resource)
-        RETURN c.name as course, d.name as dept, 
+        RETURN c.name as course, m.name as major, d.name as dept, 
+               t.name as teacher,
                ch.id as chid, ch.name as chname,
                s.id as sid, s.name as sname,
                k.name as kp, k2.name as kp2,
@@ -4245,10 +5114,23 @@ def _neo4j_overview(driver, course: Optional[str], level: str) -> Dict[str, Any]
             if not c: continue
             upsert_node(f"course:{c}", c, "course")
             
+            m = rec.get("major")
+            if m:
+                upsert_node(f"major:{m}", m, "major")
+                links.append({"source": f"course:{c}", "target": f"major:{m}", "type": "belongs_to_major"})
+            
             d = rec.get("dept")
             if d:
                 upsert_node(f"dept:{d}", d, "department")
-                links.append({"source": f"course:{c}", "target": f"dept:{d}", "type": "belongs_to"})
+                if m:
+                    links.append({"source": f"major:{m}", "target": f"dept:{d}", "type": "belongs_to_dept"})
+                else:
+                    links.append({"source": f"course:{c}", "target": f"dept:{d}", "type": "belongs_to_dept"})
+            
+            t = rec.get("teacher")
+            if t:
+                upsert_node(f"teacher:{t}", t, "teacher")
+                links.append({"source": f"teacher:{t}", "target": f"course:{c}", "type": "teaches"})
             
             chid = rec.get("chid")
             chname = rec.get("chname")
@@ -4706,46 +5588,63 @@ def _neo4j_explore(driver, node_type: str, raw: str, depth: int, expand: str) ->
         center_id = f"dept:{raw}"
         upsert_node(center_id, raw, "department")
         with driver.session() as session:
-            course_rows = (
+            major_rows = (
                 session.run(
                     """
-                    MATCH (d:Department {name: $name})<-[:BELONGS_TO_DEPT]-(c:Course)
-                    RETURN DISTINCT c.name as course
+                    MATCH (d:Department {name: $name})<-[:BELONGS_TO_DEPT]-(m:Major)
+                    RETURN DISTINCT m.name as major
                     """,
                     {"name": raw},
                 ).data()
                 or []
             )
-            for row in course_rows:
-                c = row.get("course")
-                if not c:
+            for row in major_rows:
+                m = row.get("major")
+                if not m:
                     continue
+                mid = f"major:{m}"
+                upsert_node(mid, m, "major")
+                add_link(mid, center_id, "belongs_to_dept")
+
+    elif node_type == "major":
+        center_id = f"major:{raw}"
+        upsert_node(center_id, raw, "major")
+        with driver.session() as session:
+            # Add Department link
+            dept_rows = session.run("MATCH (m:Major {name: $name})-[:BELONGS_TO_DEPT]->(d:Department) RETURN d.name as dept", {"name": raw}).data()
+            for row in dept_rows:
+                d = row["dept"]
+                did = f"dept:{d}"
+                upsert_node(did, d, "department")
+                add_link(center_id, did, "belongs_to_dept")
+            
+            # Add Course links
+            course_rows = session.run("MATCH (m:Major {name: $name})<-[:BELONGS_TO_MAJOR]-(c:Course) RETURN c.name as course", {"name": raw}).data()
+            for row in course_rows:
+                c = row["course"]
                 cid = f"course:{c}"
                 upsert_node(cid, c, "course")
-                add_link(cid, center_id, "belongs_to")
+                add_link(cid, center_id, "belongs_to_major")
 
     elif node_type == "course":
         center_id = f"course:{raw}"
         upsert_node(center_id, raw, "course")
         with driver.session() as session:
-            # Add Department link
-            dept_rows = (
-                session.run(
-                    """
-                    MATCH (c:Course {name: $name})-[:BELONGS_TO_DEPT]->(d:Department)
-                    RETURN DISTINCT d.name as dept
-                    """,
-                    {"name": raw},
-                ).data()
-                or []
-            )
-            for row in dept_rows:
-                dept = row.get("dept")
-                if not dept:
-                    continue
-                did = f"dept:{dept}"
-                upsert_node(did, dept, "department")
-                add_link(center_id, did, "belongs_to")
+            # Add Major link
+            major_rows = session.run("MATCH (c:Course {name: $name})-[:BELONGS_TO_MAJOR]->(m:Major) RETURN m.name as major", {"name": raw}).data()
+            for row in major_rows:
+                m = row["major"]
+                mid = f"major:{m}"
+                upsert_node(mid, m, "major")
+                add_link(center_id, mid, "belongs_to_major")
+            
+            # Add Teacher links
+            teacher_rows = session.run("MATCH (t:Teacher)-[:TEACHES]->(c:Course {name: $name}) RETURN t.name as teacher", {"name": raw}).data()
+            for row in teacher_rows:
+                t = row["teacher"]
+                tid = f"teacher:{t}"
+                upsert_node(tid, t, "teacher")
+                add_link(tid, center_id, "teaches")
 
             kp_rows = (
                 session.run(

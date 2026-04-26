@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { User, Lock } from '@element-plus/icons-vue'
 import api from '../api/client'
+import logo from '../assets/logo.png'
 
 const router = useRouter()
 const loading = ref(false)
@@ -39,7 +40,9 @@ async function submit() {
   <div class="login-container">
     <div class="login-box">
       <div class="login-header">
-        <img src="../assets/vue.svg" alt="Logo" class="logo" />
+        <div class="logo-wrapper">
+          <img :src="logo" alt="Logo" class="logo-img" />
+        </div>
         <h2>教学资源管理系统</h2>
         <p>基于知识图谱的智能化教学平台</p>
       </div>
@@ -111,10 +114,24 @@ async function submit() {
   margin-bottom: 30px;
 }
 
-.logo {
-  width: 60px;
-  height: 60px;
+.logo-wrapper {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  width: 72px;
+  height: 72px;
+  background: white;
+  border-radius: 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.logo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 8px;
 }
 
 .login-header h2 {

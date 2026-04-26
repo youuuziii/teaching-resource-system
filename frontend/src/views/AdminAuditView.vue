@@ -7,6 +7,7 @@ const loading = ref(false)
 const items = ref([])
 const selectedRows = ref([])
 const deleting = ref(false)
+const approvingAll = ref(false)
 
 const state = reactive({
   status: 'pending',
@@ -88,6 +89,29 @@ async function batchDelete() {
   }
 }
 
+async function batchApproveAll() {
+  if (!isDean.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确认要一键通过所有待审核的资源吗？',
+      '一键通过确认',
+      { type: 'success', confirmButtonText: '确定通过', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  approvingAll.value = true
+  try {
+    const resp = await api.post('/api/resources/batch-approve-all')
+    ElMessage.success(`成功一键通过 ${resp.data.count || 0} 个资源`)
+    await fetchList()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '操作失败')
+  } finally {
+    approvingAll.value = false
+  }
+}
+
 async function submitAudit() {
   if (!dialog.target) return
   dialog.submitting = true
@@ -123,6 +147,14 @@ onMounted(fetchList)
         </el-select>
         <el-button type="primary" :loading="loading" @click="fetchList">刷新</el-button>
         <el-button
+          v-if="isDean && state.status === 'pending'"
+          type="success"
+          :loading="approvingAll"
+          @click="batchApproveAll"
+        >
+          一键通过
+        </el-button>
+        <el-button
           v-if="canBatchDelete"
           type="danger"
           :disabled="(selectedRows || []).length === 0"
@@ -138,7 +170,16 @@ onMounted(fetchList)
       <el-table-column v-if="canBatchDelete" type="selection" width="44" />
       <el-table-column prop="title" label="标题" min-width="220" />
       <el-table-column prop="course" label="课程" min-width="120" />
-      <el-table-column prop="knowledge_point" label="知识点" min-width="140" />
+      <el-table-column label="知识点" min-width="160">
+        <template #default="{ row }">
+          <template v-if="(row.knowledge_points || []).length > 0">
+            <el-tag v-for="kp in row.knowledge_points" :key="kp.id" style="margin-right: 6px" size="small">
+              {{ kp.name }}
+            </el-tag>
+          </template>
+          <span v-else>{{ row.knowledge_point || '-' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="教师" min-width="160">
         <template #default="{ row }">
           <span v-if="(row.teachers || []).length === 0">-</span>

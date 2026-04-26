@@ -37,6 +37,7 @@ const courses = ref([])
 const courseId = ref(null)
 
 const loadingChapters = ref(false)
+
 const chapters = ref([])
 const chapterId = ref(null)
 
@@ -249,6 +250,7 @@ async function fetchCourses() {
     loadingCourses.value = false
   }
 }
+
 
 async function fetchChapters() {
   if (!isNumberValue(courseId.value)) {
@@ -592,6 +594,57 @@ async function download(item) {
   }
 }
 
+async function applySuggestion(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认将资源「${row.title}」移动到建议位置「${row.suggestion?.target_name}」吗？`,
+      '采纳建议',
+      { 
+        type: 'info',
+        confirmButtonText: '确定移动',
+        cancelButtonText: '取消'
+      }
+    )
+    const resp = await api.post(`/api/resources/${row.id}/apply-suggestion`)
+    ElMessage.success(resp.data.message || '操作成功')
+    await fetchMyResources()
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.error?.message || '操作失败')
+    }
+  }
+}
+
+async function addToBlacklist(row) {
+  const word = row.suggestion?.identified_word
+  if (!word) {
+    ElMessage.warning('未能识别出对应的黑名单词汇')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `以后将不再根据关键词「${word}」自动推荐关联位置。确认将其加入该课程的识别黑名单吗？`,
+      '忽略并加入黑名单',
+      { 
+        type: 'warning',
+        confirmButtonText: '加入黑名单',
+        cancelButtonText: '取消'
+      }
+    )
+    await api.post('/api/blacklist', {
+      word: word,
+      course_id: courseId.value,
+      reason: `教师在处理资源「${row.title}」时手动忽略`
+    })
+    ElMessage.success('已加入黑名单，下次上传将不再提示')
+    await fetchMyResources()
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.error?.message || '操作失败')
+    }
+  }
+}
+
 function getStatusType(status) {
   switch (status) {
     case 'approved': return 'success'
@@ -611,6 +664,7 @@ function getStatusLabel(status) {
 }
 
 watch(courseId, async () => {
+
   chapterId.value = null
   sectionId.value = null
   uploadForm.value = { title: '', description: '', chapter_id: null, section_id: null, knowledge_point_id: null, file: null }
@@ -760,6 +814,7 @@ onMounted(async () => {
                       <el-button type="primary" size="small" :icon="Plus" :disabled="!isNumberValue(courseId)" @click="openCreateKp">新增</el-button>
                     </div>
                   </template>
+
                   <div v-loading="loadingKps" class="structure-list">
                     <div v-if="displayKnowledgePoints.length === 0" class="empty-hint">
                       {{ currentSectionName ? '该小节暂无直属知识点' : currentChapterName ? '该章节暂无直属知识点' : '该课程暂无直属知识点' }}
@@ -935,13 +990,64 @@ onMounted(async () => {
                       <el-table-column prop="section" label="小节" />
                       <el-table-column prop="kp" label="识别到的知识点">
                         <template #default="{ row }">
-                          <el-tag size="small" type="success">{{ row.kp || '-' }}</el-tag>
+                          <div class="kp-tags">
+                            <el-tag 
+                              v-for="kp in (row.kp || '').split(', ')" 
+                              :key="kp"
+                              size="small" 
+                              type="success"
+                              class="kp-tag"
+                            >{{ kp || '-' }}</el-tag>
+                          </div>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="智能建议" width="160">
+                        <template #default="{ row }">
+                          <div v-if="row.suggestion" class="suggestion-box">
+                            <el-tooltip :content="row.suggestion.reason" placement="top">
+                              <el-tag type="warning" size="small" class="suggestion-tag">
+                                <el-icon><Warning /></el-icon>
+                                建议移动到: {{ row.suggestion.target_name }}
+                              </el-tag>
+                            </el-tooltip>
+                          </div>
+                          <span v-else>-</span>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="操作" width="120" align="center">
+                        <template #default="{ row }">
+                          <el-button-group v-if="row.suggestion">
+                            <el-button 
+                              size="small" 
+                              type="primary" 
+                              :icon="CircleCheck" 
+                              @click="applySuggestion(row)"
+                              title="采纳建议"
+                            ></el-button>
+                            <el-button 
+                              v-if="row.suggestion.identified_word" 
+                              size="small" 
+                              type="warning" 
+                              :icon="CircleClose" 
+                              @click="addToBlacklist(row)"
+                              title="忽略并加入黑名单"
+                            ></el-button>
+                          </el-button-group>
+                          <span v-else>-</span>
                         </template>
                       </el-table-column>
                       <el-table-column prop="status" label="状态" width="100">
                         <template #default="{ row }">
-                          <el-icon v-if="row.status === 'success'" color="#67C23A"><CircleCheck /></el-icon>
-                          <el-icon v-else color="#F56C6C"><CircleClose /></el-icon>
+                          <div style="display: flex; align-items: center; gap: 4px;">
+                            <el-icon v-if="row.status === 'success'" color="#67C23A"><CircleCheck /></el-icon>
+                            <template v-else>
+                              <el-tooltip :content="row.message" placement="top" v-if="row.message">
+                                <el-icon color="#F56C6C" style="cursor: help;"><CircleClose /></el-icon>
+                              </el-tooltip>
+                              <el-icon v-else color="#F56C6C"><CircleClose /></el-icon>
+                            </template>
+                            <span>{{ row.status === 'success' ? '成功' : '失败' }}</span>
+                          </div>
                         </template>
                       </el-table-column>
                     </el-table>
@@ -989,6 +1095,19 @@ onMounted(async () => {
                   {{ row.knowledge_point || '-' }}
                 </template>
               </el-table-column>
+              <el-table-column label="智能建议" width="180">
+                <template #default="{ row }">
+                  <div v-if="row.suggestion" class="suggestion-box">
+                    <el-tooltip :content="row.suggestion.reason" placement="top">
+                      <el-tag type="warning" size="small" class="suggestion-tag">
+                        <el-icon><Warning /></el-icon>
+                        建议移动到: {{ row.suggestion.target_name }}
+                      </el-tag>
+                    </el-tooltip>
+                  </div>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
               <el-table-column label="状态" width="110" align="center">
                 <template #default="{ row }">
                   <el-tag :type="getStatusType(row.status)" size="small">
@@ -996,11 +1115,27 @@ onMounted(async () => {
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="120" fixed="right" align="center">
+              <el-table-column label="操作" width="180" fixed="right" align="center">
                 <template #default="{ row }">
                   <el-button-group>
-                    <el-button size="small" :icon="Download" @click="download(row)"></el-button>
-                    <el-button size="small" type="danger" :icon="Delete" @click="removeResource(row)"></el-button>
+                    <el-button size="small" :icon="Download" @click="download(row)" title="下载"></el-button>
+                    <el-button 
+                      v-if="row.suggestion" 
+                      size="small" 
+                      type="primary" 
+                      :icon="CircleCheck" 
+                      @click="applySuggestion(row)"
+                      title="采纳建议"
+                    ></el-button>
+                    <el-button 
+                      v-if="row.suggestion && row.suggestion.identified_word" 
+                      size="small" 
+                      type="warning" 
+                      :icon="CircleClose" 
+                      @click="addToBlacklist(row)"
+                      title="忽略并加入黑名单"
+                    ></el-button>
+                    <el-button size="small" type="danger" :icon="Delete" @click="removeResource(row)" title="删除"></el-button>
                   </el-button-group>
                 </template>
               </el-table-column>
@@ -1153,10 +1288,11 @@ onMounted(async () => {
 
 .structure-card {
   border-radius: 8px;
-  height: 400px;
+  height: 350px;
   display: flex;
   flex-direction: column;
 }
+
 
 .structure-card :deep(.el-card__body) {
   flex: 1;
@@ -1339,5 +1475,33 @@ onMounted(async () => {
   font-size: 14px;
   color: #606266;
   font-weight: 500;
+}
+
+.suggestion-box {
+  display: flex;
+  align-items: center;
+}
+
+.suggestion-tag {
+  cursor: help;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-tag :deep(.el-icon) {
+  margin-right: 2px;
+}
+.kp-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.kp-tag {
+  margin: 2px 0;
 }
 </style>

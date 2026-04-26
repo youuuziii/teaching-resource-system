@@ -11,7 +11,10 @@ import {
   Key, 
   Lock,
   Unlock,
-  Setting
+  Setting,
+  Upload,
+  Download,
+  Warning
 } from '@element-plus/icons-vue'
 import api from '../api/client'
 
@@ -83,6 +86,61 @@ async function loadRbac() {
 
 const createOpen = ref(false)
 const createForm = ref({ username: '', password: '', roles: ['student'], is_active: true, class_name: '' })
+
+const bulkOpen = ref(false)
+const uploadRef = ref(null)
+const importResults = ref(null)
+const importing = ref(false)
+
+function openBulk() {
+  bulkOpen.value = true
+  importResults.value = null
+}
+
+function downloadTemplate() {
+  const headers = 'username,password,roles,class_name'
+  const example = 'student01,123456,student,计科2101\nteacher01,123456,teacher,'
+  const content = headers + '\n' + example
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.setAttribute('download', 'account_import_template.csv')
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+}
+
+async function handleImport() {
+  if (!uploadRef.value) return
+  const files = uploadRef.value.uploadFiles
+  if (files.length === 0) {
+    ElMessage.warning('请选择要上传的文件')
+    return
+  }
+
+  const file = files[0].raw
+  const formData = new FormData()
+  formData.append('file', file)
+
+  importing.value = true
+  try {
+    const resp = await api.post('/api/admin/users/bulk-import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    importResults.value = resp.data
+    if (resp.data.success > 0) {
+      ElMessage.success(`成功导入 ${resp.data.success} 个账号`)
+      await loadUsers()
+    }
+    if (resp.data.failed > 0) {
+      ElMessage.warning(`${resp.data.failed} 个账号导入失败，请查看错误详情`)
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '批量导入失败')
+  } finally {
+    importing.value = false
+  }
+}
 
 function openCreate() {
   createForm.value = { username: '', password: '', roles: ['student'], is_active: true, class_name: '' }
@@ -254,7 +312,10 @@ onMounted(async () => {
               />
               <el-button type="primary" :icon="Search" @click="loadUsers">查询</el-button>
             </div>
-            <el-button type="success" :icon="Plus" @click="openCreate">新增账号</el-button>
+            <div class="right-tools">
+              <el-button type="warning" plain :icon="Upload" @click="openBulk">批量导入</el-button>
+              <el-button type="success" :icon="Plus" @click="openCreate">新增账号</el-button>
+            </div>
           </div>
 
           <el-table :data="users" v-loading="usersLoading" border stripe style="width: 100%" class="data-table">
@@ -434,6 +495,64 @@ onMounted(async () => {
         <el-button type="primary" @click="submitRolePerms">应用更改</el-button>
       </template>
     </el-dialog>
+
+    <!-- Bulk Import Dialog -->
+    <el-dialog v-model="bulkOpen" title="批量导入账号" width="560px" destroy-on-close>
+      <div class="bulk-import-container">
+        <el-alert
+          title="导入说明"
+          type="info"
+          description="请上传 CSV 或 Excel (.xlsx) 文件。文件必须包含：username, password, roles (角色名，多个用逗号分隔) 字段。学生角色可选填 class_name。"
+          show-icon
+          :closable="false"
+          style="margin-bottom: 20px"
+        >
+          <template #default>
+            <div style="margin-top: 10px">
+              <el-button type="primary" link :icon="Download" @click="downloadTemplate">下载导入模板 (.csv)</el-button>
+            </div>
+          </template>
+        </el-alert>
+        
+        <el-upload
+          ref="uploadRef"
+          class="bulk-upload"
+          drag
+          action="#"
+          :auto-upload="false"
+          :limit="1"
+          accept=".csv,.xlsx,.xls"
+        >
+          <el-icon class="el-icon--upload"><Upload /></el-icon>
+          <div class="el-upload__text">
+            将文件拖到此处，或<em>点击上传</em>
+          </div>
+          <template #tip>
+            <div class="el-upload__tip">
+              支持 CSV, XLSX 格式，单次限 1 个文件
+            </div>
+          </template>
+        </el-upload>
+
+        <div v-if="importResults" class="import-results">
+          <el-divider>导入结果</el-divider>
+          <div class="result-stats">
+            <el-tag type="success">成功: {{ importResults.success }}</el-tag>
+            <el-tag type="danger" style="margin-left: 10px">失败: {{ importResults.failed }}</el-tag>
+          </div>
+          <div v-if="importResults.errors.length > 0" class="error-list">
+            <div class="error-item" v-for="(err, idx) in importResults.errors" :key="idx">
+              <el-icon color="#f56c6c"><Warning /></el-icon>
+              <span>{{ err }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="bulkOpen = false">关闭</el-button>
+        <el-button type="primary" :loading="importing" @click="handleImport">开始导入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -515,5 +634,45 @@ onMounted(async () => {
 
 :deep(.el-table__header) {
   background-color: #f5f7fa;
+}
+.right-tools {
+  display: flex;
+  gap: 12px;
+}
+
+.bulk-import-container {
+  padding: 0 10px;
+}
+
+.import-results {
+  margin-top: 20px;
+}
+
+.result-stats {
+  text-align: center;
+  margin-bottom: 15px;
+}
+
+.error-list {
+  max-height: 200px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  padding: 10px;
+}
+
+.error-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 8px;
+}
+
+.error-item span {
+  flex: 1;
+  word-break: break-all;
 }
 </style>
