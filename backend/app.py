@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from neo4j import GraphDatabase
+
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -260,6 +261,23 @@ class Blacklist(Base):
     word: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id"), nullable=True)  # NULL表示全局黑名单
     reason: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    course: Mapped[Optional[Course]] = relationship("Course")
+
+
+class Lexicon(Base):
+    """
+    词库模型：存储白名单、学科专业术语及缩写映射。
+    word: 原始词（如 "IR"）
+    mapping: 归一化后的标准词（如 "指令寄存器"），如果为 NULL 则表示该词本身就是标准词
+    """
+    __tablename__ = "lexicon"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    word: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    mapping: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id"), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
     course: Mapped[Optional[Course]] = relationship("Course")
@@ -877,20 +895,6 @@ def _create_app() -> Flask:
         }
 
 
-    # 模拟本地学科词库
-    INITIAL_DISCIPLINE_DICTIONARY = {
-        "计算机", "人工智能", "机器学习", "深度学习", "神经网络", "数据结构", "算法",
-        "操作系统", "计算机网络", "数据库", "软件工程", "程序设计", "编程语言", "微积分",
-        "线性代数", "概率论", "数理统计", "离散数学", "物理", "力学", "热学", "光学",
-        "电磁学", "量子力学", "相对论", "电路", "模拟电子", "数字电子", "嵌入式",
-        "寄存器", "指令寄存器", "程序计数器", "运算器", "控制器", "总线", "存储器",
-        "流水线", "中断", "缓存", "虚拟内存", "逻辑门", "多路复用器", "加法器",
-        "编译原理", "汇编语言", "微程序", "控制单元", "任务书", "练习题", "实验报告",
-        "寄存器组", "通用寄存器", "通用寄存器组", "专用寄存器", "状态寄存器", "变址寄存器", "基址寄存器",
-        "ALU", "算术逻辑单元", "累加器", "数据通路", "时序控制", "控制信号",
-        "IR", "PC", "MAR", "MDR", "CPU", "RAM", "ROM", "I/O", "ISA", "RISC", "CISC"
-    }
-
     def _analyze_entity_via_llm(word: str, course_name: Optional[str] = None, current_dir: Optional[str] = None, discipline: Optional[str] = None) -> Dict[str, Any]:
         """
         使用大模型深度分析实体：
@@ -940,8 +944,68 @@ def _create_app() -> Flask:
                 return json.loads(content)
         except Exception as e:
             print(f"LLM analysis error for '{word}': {e}")
-        
+
         return default_res
+
+    def _refine_entities_via_llm(raw_candidates: list, course_name: Optional[str] = None, discipline: Optional[str] = None) -> list:
+        """
+        使用大模型进行实体语义精炼，替代硬编码噪声词清洗。
+
+        流程：
+        1. POS过滤：使用 jieba.posseg 仅提取名词性片段
+        2. LLM语义蒸馏：交给 Qwen-plus 剔除隐含噪声并对齐同义词
+        """
+        if not raw_candidates:
+            return []
+
+        raw_text = "".join(raw_candidates[:10])
+
+        if not settings.llm_api_key:
+            return raw_candidates
+
+        try:
+            prompt = f"""你是一个专业的教育领域专家，擅长从文件名中提取学科知识点实体。
+
+## 任务
+从文本"{raw_text}"中提取1-3个最核心的知识图谱节点名词。
+
+## 要求
+1. 必须是知识图谱节点级别的专业名词（如：操作系统、寄存器、指令寄存器）
+2. 剔除任何描述性动作词（如：实现、研究、设计、进行、利用、基于）
+3. 剔除指示性词汇（如：第五章、第一节、课后、练习题、任务书）
+4. 如果存在缩写或简称，请同时输出全称（如：IR→指令寄存器，PC→程序计数器）
+5. 只返回JSON数组，不要其他解释文字
+
+## 输出格式
+{{"entities": ["实体1", "实体2"]}}
+"""
+            headers = {
+                "Authorization": f"Bearer {settings.llm_api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": settings.llm_model,
+                "messages": [
+                    {"role": "system", "content": "你是一个专业的教育领域专家，擅长识别学科知识点并进行实体归一化。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"}
+            }
+
+            resp = requests.post(settings.llm_base_url + "/chat/completions", json=payload, headers=headers, timeout=15)
+
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                if content.startswith("```json"):
+                    content = content.split("```json")[1].split("```")[0].strip()
+                result = json.loads(content)
+                entities = result.get("entities", [])
+                return entities
+        except Exception as e:
+            print(f"[!] LLM refinement error: {e}")
+
+        return raw_candidates
 
     def _process_resource_pipeline(res: Resource, db: Session) -> None:
         """
@@ -1040,16 +1104,23 @@ def _create_app() -> Flask:
 
             # 1.2 获取黑名单（用于后续过滤，不再预先擦除）
             try:
-                black_words = db.execute(
+                all_black = set(db.execute(
                     select(Blacklist.word).where((Blacklist.course_id == res.course_id) | (Blacklist.course_id.is_(None)))
-                ).scalars().all()
+                ).scalars().all())
             except Exception as e:
                 print(f"[!] Error fetching blacklist: {e}")
-                black_words = []
-            
-            default_black = ["讲义", "课件", "习题", "实验", "作业", "参考资料", "复习", "预习", "文档", "表格", "练习", "任务书", "副本", "设计与实现", "进行", "利用", "基于", "通过", "关于", "及其", "与", "和", "研究", "分析", "探讨", "介绍", "的使用", "Logisim", "MIPS", "FPGA"]
-            all_black = set(list(black_words) + default_black)
-            
+                all_black = set()
+
+            # 1.3 获取词库（白名单和映射）
+            try:
+                lexicon_entries = db.execute(
+                    select(Lexicon).where((Lexicon.course_id == res.course_id) | (Lexicon.course_id.is_(None)))
+                ).scalars().all()
+                discipline_dict = {e.word: (e.mapping if e.mapping else e.word) for e in lexicon_entries}
+            except Exception as e:
+                print(f"[!] Error fetching lexicon: {e}")
+                discipline_dict = {}
+
             # --- 阶段2: 分词干预 (Tokenization Tuning) ---
             whitelist = []
             course = res.course
@@ -1070,7 +1141,7 @@ def _create_app() -> Flask:
                     except:
                         pass
             
-            for word in INITIAL_DISCIPLINE_DICTIONARY:
+            for word in discipline_dict:
                 if len(word) > 1:
                     try:
                         jieba.add_word(word)
@@ -1079,24 +1150,43 @@ def _create_app() -> Flask:
 
             # --- 阶段3: 实体提取策略 (Extraction Logic) ---
             candidate_entities = [] # 候选实体列表
-            
-            # 策略A：优先匹配白名单长词
+            used_positions = [] # 记录已匹配的位置，避免重叠
+
+            # 策略A：本地词库匹配 (Lexicon Match) - 优先级最高
+            # 使用正则匹配而非简单子串匹配，支持中英混杂
+            sorted_lexicon = sorted([w for w in discipline_dict.keys() if len(w) > 1], key=len, reverse=True)
+            for w in sorted_lexicon:
+                # 构造正则：处理纯英文词和纯中文词
+                if re.match(r"^[A-Za-z0-9]+$", w):
+                    pattern = re.compile(r"\b" + w + r"\b", re.IGNORECASE)
+                else:
+                    pattern = re.compile(re.escape(w))
+                match = pattern.search(clean_name)
+                if match:
+                    start, end = match.start(), match.end()
+                    # 检查是否与已匹配位置重叠
+                    if not any(start < ep and end > sp for sp, ep in used_positions):
+                        used_positions.append((start, end))
+                        if w not in candidate_entities:
+                            candidate_entities.append(w)
+
+            # 策略B：优先匹配白名单长词 (Whitelist Match)
             sorted_whitelist = sorted([w for w in whitelist if len(w) > 1], key=len, reverse=True)
-            temp_name = clean_name
             for w in sorted_whitelist:
-                if w in temp_name:
-                    if w not in candidate_entities:
-                        candidate_entities.append(w)
-                    temp_name = temp_name.replace(w, " ") 
+                if w in clean_name and w not in candidate_entities:
+                    candidate_entities.append(w)
             
-            # 策略B：学术名词与缩写识别 (IR, PC, CPU, 通用寄存器组等)
-            # 强化正则：支持更多缩写和组合词
-            academic_patterns = re.findall(r"\b[A-Z0-9]{2,}\b|[\u4e00-\u9fa5]{2,}(?=[A-Z])|[A-Z]{2,}(?=[\u4e00-\u9fa5])|[\u4e00-\u9fa5]+寄存器组?|[\u4e00-\u9fa5]+计数器|[\u4e00-\u9fa5]+单元|[\u4e00-\u9fa5]+电路", clean_name)
+            # 策略C：学术名词与缩写识别 (Regex Match)
+            # 优化正则：移除了 \b，改用更灵活的匹配方式，支持中英混排
+            # 模式解释：
+            # 1. [A-Z0-9]{2,} : 连续大写字母或数字（缩写）
+            # 2. (?:指令|通用|专用|状态|变址|基址)?[\u4e00-\u9fa5]*(?:寄存器组?|计数器|单元|电路|控制器|运算器|存储器|总线|接口) : 典型硬件组件名
+            academic_patterns = re.findall(r"[A-Z0-9]{2,}|(?:指令|通用|专用|状态|变址|基址)?[\u4e00-\u9fa5]*(?:寄存器组?|计数器|单元|电路|控制器|运算器|存储器|总线|接口)", clean_name)
             for ap in academic_patterns:
                 if ap not in candidate_entities and len(ap) >= 2:
                     candidate_entities.append(ap)
 
-            # 策略C：规则启发（词性标注与 TextRank）
+            # 策略D：规则启发（词性标注与 TextRank）
             try:
                 words = pseg.cut(clean_name)
                 valid_tags = {'n', 'nz', 'vn', 'nrt'}
@@ -1112,33 +1202,34 @@ def _create_app() -> Flask:
                         candidate_entities.append(kw)
             except Exception as e:
                 print(f"[!] Tokenization error: {e}")
-            
-            # --- 阶段4: 实体清洗与去噪 (Entity Post-processing) ---
+
+            # --- 阶段4: 实体清洗与去噪 (LLM语义精炼) ---
+            # 使用大模型替代硬编码噪声词进行语义清洗
+            try:
+                refined_entities = _refine_entities_via_llm(candidate_entities, course_name=res.course.name if res.course else None)
+            except Exception as e:
+                print(f"[!] LLM call failed: {e}")
+                refined_entities = candidate_entities
+
             extracted_entities = []
-            noise_prefixes = ["进行", "利用", "基于", "通过", "关于", "及", "与", "和", "的", "针对", "研究", "分析", "探讨", "介绍", "的使用"]
-            
-            for entity in candidate_entities:
-                # 1. 剔除黑名单中的词
-                if entity in all_black:
-                    continue
-                
-                # 2. 进一步清洗前后干扰
-                temp_entity = entity.strip("- _")
-                changed = True
-                while changed:
-                    old_temp = temp_entity
-                    for noise in noise_prefixes:
-                        if temp_entity.startswith(noise):
-                            temp_entity = temp_entity[len(noise):]
-                        if temp_entity.endswith(noise):
-                            temp_entity = temp_entity[:-len(noise)]
-                    temp_entity = temp_entity.strip("- _")
-                    changed = (old_temp != temp_entity)
-                
-                # 3. 过滤过短或纯数字/符号的词
-                if len(temp_entity) >= 2 and not re.match(r"^\d+$", temp_entity):
-                    if temp_entity not in extracted_entities:
-                        extracted_entities.append(temp_entity)
+            for entity in refined_entities:
+                try:
+                    # 基础过滤：长度 >= 2 且不是纯数字
+                    if len(entity) >= 2 and not re.match(r"^\d+$", entity) and entity not in all_black:
+                        if entity not in extracted_entities:
+                            extracted_entities.append(entity)
+                except Exception as e:
+                    print(f"[!] Entity filtering error for '{entity}': {e}")
+
+            if not extracted_entities:
+                for entity in candidate_entities:
+                    temp = entity.strip("- _")
+                    if temp not in all_black and len(temp) >= 2 and not re.match(r"^\d+$", temp):
+                        if temp not in extracted_entities:
+                            extracted_entities.append(temp)
+
+            # 排序：根据在原文件名中出现的顺序排序，确保第一个提到的实体作为主实体
+            extracted_entities.sort(key=lambda x: clean_name.find(x) if x in clean_name else 999)
 
             # --- 阶段5: 外部知识库校验 (External Validation) & 图谱关联 ---
             final_kp_ids = []
@@ -1166,23 +1257,25 @@ def _create_app() -> Flask:
                 if chap: current_dir_name = chap.name
 
             for entity in extracted_entities:
-                target_kp_name = entity
+                # 0. 实体归一化：优先使用本地词库的映射关系 (解决 IR -> 指令寄存器等简称问题)
+                target_kp_name = discipline_dict.get(entity, entity)
                 existing_kp = None
                 
-                # 1. 本地匹配：优先查找已有知识点
+                # 1. 本地匹配：优先查找已有知识点 (使用归一化后的名称)
                 existing_kp = db.execute(
-                    select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id).where(KnowledgePoint.name == entity)
+                    select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id).where(KnowledgePoint.name == target_kp_name)
                 ).scalar_one_or_none()
 
                 if existing_kp:
+                    # 更新 target_kp_name 为数据库中实际存储的名称
                     target_kp_name = existing_kp.name
                 else:
-                    # 2. 快速通行证：检查本地学科词库 (INITIAL_DISCIPLINE_DICTIONARY)
-                    is_discipline_word = entity in INITIAL_DISCIPLINE_DICTIONARY
+                    # 2. 快速通行证：检查原始实体或归一化词是否在本地学科词库中
+                    is_discipline_word = (entity in discipline_dict or target_kp_name in discipline_dict)
                     
                     if is_discipline_word:
-                        print(f"[*] Entity '{entity}' matched in local discipline dictionary.")
-                        # 本地库命中的直接作为新知识点名称
+                        print(f"[*] Entity '{entity}' (normalized to '{target_kp_name}') matched in local discipline dictionary.")
+                        # 本地库命中的直接作为新知识点名称，此时 target_kp_name 已经是全称
                     else:
                         # 3. 外部知识库验证 (LLM 驱动版)
                         if settings.llm_api_key:
