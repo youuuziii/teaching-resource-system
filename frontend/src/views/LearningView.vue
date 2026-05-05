@@ -105,13 +105,16 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="learning-container">
-    <el-card class="main-card" shadow="never">
+  <div class="page-view">
+    <el-card class="main-card learning-page" shadow="hover">
       <template #header>
-        <div class="card-header">
-          <div class="title-section">
-            <el-icon :size="20"><Monitor /></el-icon>
-            <span class="title">学习与推荐中心</span>
+        <div class="page-toolbar learning-toolbar">
+          <div class="page-toolbar__title title-section">
+            <el-icon :size="22" class="title-icon"><Monitor /></el-icon>
+            <div class="title-block">
+              <span class="title">学习与推荐中心</span>
+              <span class="title-hint">收藏、推荐与最近学习记录</span>
+            </div>
           </div>
           <el-button :icon="Refresh" @click="refreshAll" size="small">刷新当前数据</el-button>
         </div>
@@ -229,8 +232,30 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.learning-container {
-  padding: 0;
+.learning-page {
+  min-height: 720px;
+}
+
+.learning-toolbar {
+  align-items: flex-start;
+}
+
+.learning-page :deep(.el-tabs__content) {
+  margin-top: 8px;
+}
+
+.learning-page :deep(.el-table) {
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.learning-page :deep(.el-collapse-item__header) {
+  border-radius: 12px;
+}
+
+.learning-page :deep(.el-table__cell) {
+  padding-top: 14px;
+  padding-bottom: 14px;
 }
 
 .main-card {

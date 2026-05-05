@@ -286,12 +286,11 @@ class Lexicon(Base):
 class Teacher(Base):
     __tablename__ = "teachers"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    teacher_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class Student(Base):
@@ -303,18 +302,15 @@ class Student(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     class_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class Dean(Base):
     __tablename__ = "deans"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dean_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
-    dean_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class CourseTeacher(Base):
@@ -323,7 +319,7 @@ class CourseTeacher(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), nullable=False)
-    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id"), nullable=False)
+    teacher_id: Mapped[str] = mapped_column(ForeignKey("teachers.teacher_id"), nullable=False)
     class_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     course: Mapped[Course] = relationship("Course")
@@ -399,7 +395,7 @@ class ResourceTeacher(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id"), nullable=False)
-    teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id"), nullable=False)
+    teacher_id: Mapped[str] = mapped_column(ForeignKey("teachers.teacher_id"), nullable=False)
 
     resource: Mapped[Resource] = relationship("Resource", back_populates="resource_teachers")
     teacher: Mapped[Teacher] = relationship("Teacher")
@@ -1833,7 +1829,7 @@ def _create_app() -> Flask:
                         existing.tags.append(ResourceTag(tag=t))
                     existing.resource_teachers.clear()
                     for teacher in teachers:
-                        existing.resource_teachers.append(ResourceTeacher(teacher_id=teacher.id))
+                        existing.resource_teachers.append(ResourceTeacher(teacher_id=teacher.teacher_id))
                     
                     if existing.status == "approved":
                         _neo4j_upsert_resource(existing)
@@ -1867,7 +1863,7 @@ def _create_app() -> Flask:
                 for t in tags:
                     r.tags.append(ResourceTag(tag=t))
                 for teacher in teachers:
-                    r.resource_teachers.append(ResourceTeacher(teacher_id=teacher.id))
+                    r.resource_teachers.append(ResourceTeacher(teacher_id=teacher.teacher_id))
                 
                 if r.status == "approved":
                     _neo4j_upsert_resource(r)
@@ -1903,7 +1899,7 @@ def _create_app() -> Flask:
                     select(CourseTeacher).where(CourseTeacher.course_id == course.id).where(CourseTeacher.teacher_id == teacher.id)
                 ).scalar_one_or_none()
                 if not exists:
-                    db.add(CourseTeacher(course_id=course.id, teacher_id=teacher.id))
+                    db.add(CourseTeacher(course_id=course.id, teacher_id=teacher.teacher_id))
 
             ensure_course_teacher(c_math, t_zhang)
             ensure_course_teacher(c_ds, t_li)
@@ -2300,9 +2296,12 @@ def _create_app() -> Flask:
     def list_courses():
         q = (request.args.get("q") or "").strip()
         major_id = _parse_int(request.args.get("major_id"))
+        page = max(1, _parse_int(request.args.get("page")) or 1)
+        page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 20))
+        offset = (page - 1) * page_size
         with SessionLocal() as db:
             user = get_current_user(db)
-            stmt = select(Course).order_by(Course.created_at.desc())
+            stmt = select(Course)
             
             if q:
                 like = f"%{q}%"
@@ -2311,7 +2310,8 @@ def _create_app() -> Flask:
             if major_id:
                 stmt = stmt.join(CourseMajor).where(CourseMajor.major_id == major_id)
 
-            items = db.execute(stmt).scalars().all()
+            total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
+            items = db.execute(stmt.order_by(Course.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
             return jsonify(
                 {
                     "items": [
@@ -2324,7 +2324,10 @@ def _create_app() -> Flask:
                             "created_at": c.created_at.isoformat(),
                         }
                         for c in items
-                    ]
+                    ],
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
                 }
             )
 
@@ -2600,7 +2603,7 @@ def _create_app() -> Flask:
                 t = db.get(Teacher, tid)
                 if not t:
                     continue
-                db.add(CourseTeacher(course_id=course_id, teacher_id=tid, class_name=cname))
+                db.add(CourseTeacher(course_id=course_id, teacher_id=str(tid), class_name=cname))
                 _neo4j_upsert_course_teacher(course_id, tid)
 
             
@@ -2952,7 +2955,7 @@ def _create_app() -> Flask:
                     "name": s.name,
                     "chapter_id": s.chapter_id,
                     "order_index": s.order_index,
-                    "created_at": s.created_at.isoformat()
+                    "created_at": None
                 } for s in items]
             })
 
@@ -3079,7 +3082,7 @@ def _create_app() -> Flask:
     def list_teachers():
         keyword = (request.args.get("keyword") or "").strip()
         with SessionLocal() as db:
-            q = select(Teacher).order_by(Teacher.created_at.desc())
+            q = select(Teacher).order_by(Teacher.name.asc())
             if keyword:
                 like = f"%{keyword}%"
                 q = q.where(Teacher.name.like(like))
@@ -3088,12 +3091,12 @@ def _create_app() -> Flask:
                 {
                     "items": [
                         {
-                            "id": t.id,
+                            "id": t.teacher_id,
                             "name": t.name,
                             "email": t.email,
                             "user_id": t.user_id,
                             "has_user": t.user_id is not None,
-                            "created_at": t.created_at.isoformat(),
+                            "created_at": None,
                         }
                         for t in items
                     ]
@@ -3148,6 +3151,16 @@ def _create_app() -> Flask:
 
             return jsonify({"token": make_token(new_user), "user": _user_dto(new_user)})
 
+    def _password_matches(stored: str, supplied: str) -> bool:
+        if not stored:
+            return False
+        try:
+            if check_password_hash(stored, supplied):
+                return True
+        except Exception:
+            pass
+        return stored == supplied
+
     @app.post("/api/auth/login")
     def login():
         data = _json()
@@ -3158,7 +3171,23 @@ def _create_app() -> Flask:
 
         with SessionLocal() as db:
             user = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
-            if not user or not check_password_hash(user.password_hash, password):
+
+            if not user:
+                s_user_id = db.execute(select(Student.user_id).where(Student.student_id == username)).scalar()
+                if s_user_id:
+                    user = db.get(User, s_user_id)
+
+            if not user:
+                t_user_id = db.execute(select(Teacher.user_id).where(Teacher.teacher_id == username)).scalar()
+                if t_user_id:
+                    user = db.get(User, t_user_id)
+
+            if not user:
+                d_user_id = db.execute(select(Dean.user_id).where(Dean.dean_id == username)).scalar()
+                if d_user_id:
+                    user = db.get(User, d_user_id)
+
+            if not user or not _password_matches(user.password_hash, password):
                 raise ApiError("UNAUTHORIZED", "Invalid credentials", 401)
             if not user.is_active:
                 raise ApiError("FORBIDDEN", "User disabled", 403)
@@ -3172,14 +3201,14 @@ def _create_app() -> Flask:
 
     @app.get("/api/notifications")
     def list_notifications():
+        page = max(1, _parse_int(request.args.get("page")) or 1)
+        page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 5))
+        offset = (page - 1) * page_size
         with SessionLocal() as db:
             user = require_auth(db)
-            stmt = (
-                select(Notification)
-                .where(Notification.user_id == user.id)
-                .order_by(Notification.created_at.desc())
-            )
-            items = db.execute(stmt).scalars().all()
+            stmt = select(Notification).where(Notification.user_id == user.id)
+            total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
+            items = db.execute(stmt.order_by(Notification.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
             return jsonify({
                 "items": [
                     {
@@ -3192,7 +3221,10 @@ def _create_app() -> Flask:
                         "created_at": n.created_at.isoformat()
                     }
                     for n in items
-                ]
+                ],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
             })
 
     @app.post("/api/notifications/read-all")
@@ -3316,11 +3348,11 @@ def _create_app() -> Flask:
             require_roles(user, {"teacher"})
             
             # Find all teacher profiles linked to this user or with the same name if unlinked
-            teacher_ids_stmt = select(Teacher.id).where(Teacher.user_id == user.id)
+            teacher_ids_stmt = select(Teacher.teacher_id).where(Teacher.user_id == user.id)
             teacher_ids = set(db.execute(teacher_ids_stmt).scalars().all())
             
             # Fallback: teachers with same name but no user_id
-            fallback_stmt = select(Teacher.id).where(Teacher.name == user.username).where(Teacher.user_id.is_(None))
+            fallback_stmt = select(Teacher.teacher_id).where(Teacher.name == user.username).where(Teacher.user_id.is_(None))
             teacher_ids.update(db.execute(fallback_stmt).scalars().all())
 
             if not teacher_ids:
@@ -3484,14 +3516,14 @@ def _create_app() -> Flask:
             tags = _split_tags(tags_raw)
             for t in tags:
                 res.tags.append(ResourceTag(tag=t))
-            res.resource_teachers.append(ResourceTeacher(teacher_id=trow.id))
+            res.resource_teachers.append(ResourceTeacher(teacher_id=trow.teacher_id))
 
             deans = db.execute(
                 select(User).join(User.roles).where(Role.name == "dean")
             ).scalars().all()
             for dean in deans:
                 db.add(Notification(
-                    user_id=dean.id,
+                    user_id=dean.user_id,
                     title="待审核资源",
                     content=f"教师 {user.username} 上传了新资源《{res.title}》，请及时审核。",
                     type="audit_pending",
@@ -3628,7 +3660,7 @@ def _create_app() -> Flask:
 
                         _process_resource_pipeline(res, db)
 
-                        res.resource_teachers.append(ResourceTeacher(teacher_id=trow.id))
+                        res.resource_teachers.append(ResourceTeacher(teacher_id=trow.teacher_id))
                         results.append({
                             "filename": original_name,
                             "status": "success",
@@ -3648,7 +3680,7 @@ def _create_app() -> Flask:
                 deans = db.execute(select(User).join(User.roles).where(Role.name == "dean")).scalars().all()
                 for dean in deans:
                     db.add(Notification(
-                        user_id=dean.id,
+                        user_id=dean.user_id,
                         title="批量资源待审核",
                         content=f"教师 {user.username} 批量上传了 {len(files)} 份资源，请及时审核。",
                         type="audit_pending"
@@ -3866,6 +3898,9 @@ def _create_app() -> Flask:
         course_id = _parse_int(request.args.get("course_id"))
         knowledge_point_id = _parse_int(request.args.get("knowledge_point_id"))
         teacher_id = _parse_int(request.args.get("teacher_id"))
+        page = max(1, _parse_int(request.args.get("page")) or 1)
+        page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 12))
+        offset = (page - 1) * page_size
 
         with SessionLocal() as db:
             if status not in {"pending", "approved", "rejected"}:
@@ -3882,8 +3917,7 @@ def _create_app() -> Flask:
                     if not user_roles.intersection({"dean", "admin", "teacher"}):
                         raise ApiError("FORBIDDEN", "Insufficient role", 403)
 
-            q = select(Resource).order_by(Resource.created_at.desc())
-            q = q.where(Resource.status == status)
+            q = select(Resource).where(Resource.status == status)
             if user and status in {"pending", "rejected"}:
                 user_roles = {r.name for r in user.roles}
                 if "teacher" in user_roles and "dean" not in user_roles and "admin" not in user_roles:
@@ -3901,10 +3935,12 @@ def _create_app() -> Flask:
                 q = q.join(ResourceTeacher, ResourceTeacher.resource_id == Resource.id).where(
                     ResourceTeacher.teacher_id == teacher_id
                 )
-            resources = db.execute(q).scalars().all()
             if tag:
-                resources = [r for r in resources if tag in {t.tag for t in r.tags}]
-            return jsonify({"items": [_resource_dto(r) for r in resources]})
+                q = q.join(ResourceTag, ResourceTag.resource_id == Resource.id).where(ResourceTag.tag == tag)
+
+            total = db.execute(select(func.count()).select_from(q.subquery())).scalar_one() or 0
+            resources = db.execute(q.order_by(Resource.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
+            return jsonify({"items": [_resource_dto(r) for r in resources], "total": total, "page": page, "page_size": page_size})
 
     @app.get("/api/resources/<int:resource_id>")
     def get_resource(resource_id: int):
@@ -4151,7 +4187,7 @@ def _create_app() -> Flask:
             )
             res.resource_teachers.clear()
             for t in teachers:
-                res.resource_teachers.append(ResourceTeacher(teacher_id=t.id))
+                res.resource_teachers.append(ResourceTeacher(teacher_id=t.teacher_id))
             db.commit()
             db.refresh(res)
             return jsonify({"resource": _resource_dto(res)})
@@ -4597,13 +4633,16 @@ def _create_app() -> Flask:
     def admin_list_users():
         q = (request.args.get("q") or "").strip()
         role = (request.args.get("role") or "").strip().lower()
+        page = max(1, _parse_int(request.args.get("page")) or 1)
+        page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 10))
+        offset = (page - 1) * page_size
         if role and role not in {"admin", "dean", "teacher", "student"}:
             raise ApiError("BAD_REQUEST", "invalid role filter", 400)
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"admin", "dean"})
             is_dean = "dean" in {r.name for r in user.roles} and "admin" not in {r.name for r in user.roles}
-            stmt = select(User).order_by(User.created_at.desc(), User.id.desc())
+            stmt = select(User)
             if role:
                 if is_dean and role in {"admin", "dean"}:
                     raise ApiError("FORBIDDEN", "Insufficient role", 403)
@@ -4612,8 +4651,9 @@ def _create_app() -> Flask:
                 stmt = stmt.where(~User.roles.any(Role.name.in_(["admin", "dean"])))
             if q:
                 stmt = stmt.where(User.username.like(f"%{q}%"))
-            users = db.execute(stmt).scalars().all()
-            return jsonify({"items": [_user_admin_dto(u, db) for u in users]})
+            total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
+            users = db.execute(stmt.order_by(User.created_at.desc(), User.id.desc()).offset(offset).limit(page_size)).scalars().all()
+            return jsonify({"items": [_user_admin_dto(u, db) for u in users], "total": total, "page": page, "page_size": page_size})
 
     @app.post("/api/admin/users")
     def admin_create_user():
@@ -4965,10 +5005,15 @@ def _create_app() -> Flask:
 
     @app.get("/api/admin/logs")
     def get_logs():
+        page = max(1, _parse_int(request.args.get("page")) or 1)
+        page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 20))
+        offset = (page - 1) * page_size
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"admin"})
-            logs = db.execute(select(SystemLog).order_by(SystemLog.created_at.desc()).limit(200)).scalars().all()
+            stmt = select(SystemLog)
+            total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
+            logs = db.execute(stmt.order_by(SystemLog.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
             items = [
                 {
                     "id": l.id,
@@ -4981,7 +5026,7 @@ def _create_app() -> Flask:
                 }
                 for l in logs
             ]
-            return jsonify({"items": items})
+            return jsonify({"items": items, "total": total, "page": page, "page_size": page_size})
 
     @app.post("/api/admin/backup")
     def backup():

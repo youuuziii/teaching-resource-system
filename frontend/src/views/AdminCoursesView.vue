@@ -16,6 +16,7 @@ import api from '../api/client'
 
 const loading = ref(false)
 const courses = ref([])
+const pagination = ref({ page: 1, pageSize: 10, total: 0 })
 const teachers = ref([])
 const assignedByCourseId = ref({})
 const keyword = ref('')
@@ -29,7 +30,7 @@ const rolesOfMe = computed(() => {
     return []
   }
 })
-const isDean = computed(() => rolesOfMe.value.includes('dean') || rolesOfMe.value.includes('admin'))
+const isDean = computed(() => rolesOfMe.value.includes('dean'))
 
 const createOpen = ref(false)
 const createForm = ref({ name: '', code: '', major_ids: [], description: '' })
@@ -40,7 +41,7 @@ const majors = ref([])
 const assignOpen = ref(false)
 const assignLoading = ref(false)
 const assignCourse = ref(null)
-const assignments = ref([{ teacher_id: null, class_name: '' }])
+const assignments = ref([{ teacher_id: null }])
 
 const teacherOptions = computed(() => (teachers.value || []).map((t) => ({ label: `${t.name}${t.has_user ? '' : ' (未绑定账号)'}`, value: t.id })))
 
@@ -76,14 +77,26 @@ function removeMajorFromForm(mid) {
 async function fetchCourses() {
   loading.value = true
   try {
-    const resp = await api.get('/api/courses', { params: { q: (keyword.value || '').trim() || undefined } })
+    const resp = await api.get('/api/courses', { params: { q: (keyword.value || '').trim() || undefined, page: pagination.value.page, page_size: pagination.value.pageSize } })
     courses.value = resp.data.items || []
+    pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载课程失败')
     courses.value = []
   } finally {
     loading.value = false
   }
+}
+
+function handlePageChange(page) {
+  pagination.value.page = page
+  fetchCourses().then(refreshAssignedMap)
+}
+
+function handleSizeChange(size) {
+  pagination.value.pageSize = size
+  pagination.value.page = 1
+  fetchCourses().then(refreshAssignedMap)
 }
 
 async function fetchDepartments() {
@@ -201,12 +214,12 @@ async function openAssign(row) {
   try {
     const items = await fetchAssigned(row.id)
     if (items && items.length > 0) {
-      assignments.value = items.map(t => ({ teacher_id: t.id, class_name: t.class_name || '' }))
+      assignments.value = items.map(t => ({ teacher_id: t.id }))
     } else {
-      assignments.value = [{ teacher_id: null, class_name: '' }]
+      assignments.value = [{ teacher_id: null }]
     }
   } catch (e) {
-    assignments.value = [{ teacher_id: null, class_name: '' }]
+    assignments.value = [{ teacher_id: null }]
     ElMessage.error(e?.response?.data?.error?.message || '加载已分配教师失败')
   } finally {
     assignLoading.value = false
@@ -214,7 +227,7 @@ async function openAssign(row) {
 }
 
 function addAssignment() {
-  assignments.value.push({ teacher_id: null, class_name: '' })
+  assignments.value.push({ teacher_id: null })
 }
 
 function removeAssignment(index) {
@@ -279,7 +292,7 @@ onMounted(async () => {
 
 <template>
   <div class="admin-courses-container">
-    <el-card class="main-card" shadow="never">
+    <el-card class="main-card courses-fixed" shadow="never">
       <template #header>
         <div class="card-header">
           <div class="title-section">
@@ -317,18 +330,18 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column prop="description" label="课程描述" min-width="240" show-overflow-tooltip />
-        <el-table-column label="已分配教学任务" min-width="280">
+        <el-table-column label="已分配教师" min-width="280">
           <template #default="{ row }">
             <div class="assignment-tags">
               <el-tooltip 
                 v-for="t in (assignedByCourseId[row.id] || [])" 
                 :key="t.id" 
-                :content="`教师: ${t.name} | 班级: ${t.class_name || '未指定'}`" 
+                :content="`教师: ${t.name}`" 
                 placement="top"
               >
                 <el-tag size="small" effect="plain" class="assign-tag">
                   <el-icon><User /></el-icon>
-                  {{ t.name }}{{ t.class_name ? ` (${t.class_name})` : '' }}
+                  {{ t.name }}
                 </el-tag>
               </el-tooltip>
               <span v-if="!((assignedByCourseId[row.id] || []).length)" class="empty-text">未分配教师</span>
@@ -350,6 +363,18 @@ onMounted(async () => {
           </template>
         </el-table-column>
       </el-table>
+      <div class="table-pagination">
+        <el-pagination
+          v-model:current-page="pagination.page"
+          v-model:page-size="pagination.pageSize"
+          :total="pagination.total"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="共, sizes, prev, pager, next, jumper"
+          background
+          @current-change="handlePageChange"
+          @size-change="handleSizeChange"
+        />
+      </div>
     </el-card>
 
     <!-- Create Course Dialog -->
@@ -418,16 +443,15 @@ onMounted(async () => {
         <el-form label-position="top">
           <div v-for="(item, index) in assignments" :key="index" class="assign-row">
             <div class="row-inputs">
-              <el-select v-model="item.teacher_id" filterable placeholder="选择任课教师" style="flex: 1.5">
+              <el-select v-model="item.teacher_id" filterable placeholder="选择任课教师" style="width: 100%">
                 <el-option v-for="opt in teacherOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
               </el-select>
-              <el-input v-model="item.class_name" placeholder="教授班级 (如: 计科2101)" style="flex: 1" />
             </div>
             <el-button type="danger" circle icon="Delete" @click="removeAssignment(index)" :disabled="assignments.length <= 1" />
           </div>
           
           <el-button type="primary" plain style="width: 100%; margin-top: 10px" @click="addAssignment" :icon="Plus">
-            新增任课配置
+            添加任课教师
           </el-button>
         </el-form>
       </div>

@@ -178,46 +178,94 @@ watch(course, () => load())
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
-        <div style="font-weight: 600">知识图谱</div>
-        <el-input v-model="course" placeholder="课程过滤（可选）" style="width: 200px" clearable />
-        <el-switch
-          v-model="isFull"
-          active-text="展示全部"
-          inactive-text="基础视图"
-          @change="load"
-        />
-        
-        <el-radio-group v-model="layout" size="small" @change="render">
-          <el-radio-button label="force">力导向</el-radio-button>
-          <el-radio-button label="circular">环形</el-radio-button>
-        </el-radio-group>
+  <div class="page-view graph-page-wrap">
+    <el-card class="main-card graph-page" shadow="hover">
+      <template #header>
+        <div class="page-toolbar graph-toolbar">
+          <div class="page-toolbar__title title-section">
+            <el-icon :size="22" class="title-icon"><Share /></el-icon>
+            <div class="title-block">
+              <span class="title">知识图谱</span>
+              <span class="title-hint">探索课程、知识点与资源之间的关联网络</span>
+            </div>
+          </div>
+          <div class="toolbar-actions graph-actions">
+            <el-input v-model="course" placeholder="课程过滤（可选）" class="graph-input" clearable />
+            <el-switch
+              v-model="isFull"
+              active-text="展示全部"
+              inactive-text="基础视图"
+              @change="load"
+            />
+            
+            <el-radio-group v-model="layout" size="small" @change="render">
+              <el-radio-button label="force">力导向</el-radio-button>
+              <el-radio-button label="circular">环形</el-radio-button>
+            </el-radio-group>
 
-        <el-tag type="info">{{ graph.source || 'unknown' }}</el-tag>
-        <el-button :loading="loading" @click="load">刷新</el-button>
+            <el-tag type="info">{{ graph.source || 'unknown' }}</el-tag>
+            <el-button :loading="loading" @click="load">刷新</el-button>
+          </div>
+        </div>
+      </template>
+      <div ref="chartEl" class="graph-canvas" />
+    </el-card>
+
+    <el-drawer v-model="drawerOpen" :with-header="true" size="520px">
+      <template #header>
+        <div style="display: flex; align-items: center; gap: 8px">
+          <div style="font-weight: 600">关联资源</div>
+          <el-tag type="info">{{ selectedNode?.name || selectedNode?.id }}</el-tag>
+        </div>
+      </template>
+
+      <div>
+        <el-table :data="resourceItems" v-loading="resourceLoading" style="width: 100%">
+          <el-table-column label="标题" min-width="220">
+            <template #default="{ row }">
+              <el-link type="primary" @click="openDetail(row)">{{ row.title }}</el-link>
+            </template>
+          </el-table-column>
+          <el-table-column prop="course" label="课程" min-width="120" />
+          <el-table-column prop="knowledge_point" label="知识点" min-width="140" />
+        </el-table>
       </div>
-    </template>
-    <div ref="chartEl" style="height: 560px; width: 100%" />
-  </el-card>
-
-  <el-drawer v-model="drawerOpen" :with-header="true" size="520px">
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 8px">
-        <div style="font-weight: 600">关联资源</div>
-        <el-tag type="info">{{ selectedNode?.name || selectedNode?.id }}</el-tag>
-      </div>
-    </template>
-    <el-table :data="resourceItems" v-loading="resourceLoading" style="width: 100%">
-      <el-table-column label="标题" min-width="220">
-        <template #default="{ row }">
-          <el-link type="primary" @click="openDetail(row)">{{ row.title }}</el-link>
-        </template>
-      </el-table-column>
-      <el-table-column prop="course" label="课程" min-width="120" />
-      <el-table-column prop="knowledge_point" label="知识点" min-width="140" />
-    </el-table>
-
-  </el-drawer>
+    </el-drawer>
+  </div>
 </template>
+
+<style scoped>
+.graph-page-wrap {
+  width: 100%;
+}
+
+.graph-page {
+  min-height: 700px;
+  width: 100%;
+}
+
+.graph-toolbar {
+  align-items: flex-start;
+}
+
+.graph-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.graph-input {
+  width: 220px;
+}
+
+.graph-canvas {
+  height: 590px;
+  width: 100%;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(245, 248, 255, 0.9), rgba(236, 242, 252, 0.95));
+  border: 1px solid rgba(84, 112, 180, 0.14);
+}
+
+.el-drawer :deep(.el-drawer__body) {
+  padding-top: 0;
+}
+</style>

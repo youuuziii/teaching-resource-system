@@ -15,7 +15,7 @@ const form = reactive({
 
 async function submit() {
   if (!form.username || !form.password) {
-    ElMessage.warning('请输入用户名和密码')
+    ElMessage.warning('请输入用户名/学号/职工号和密码')
     return
   }
   loading.value = true
@@ -26,6 +26,7 @@ async function submit() {
     })
     localStorage.setItem('token', resp.data.token)
     localStorage.setItem('user', JSON.stringify(resp.data.user))
+    window.dispatchEvent(new Event('user-updated'))
     ElMessage.success('欢迎回来')
     router.push('/')
   } catch (e) {
@@ -52,7 +53,7 @@ async function submit() {
           <el-form-item>
             <el-input 
               v-model="form.username" 
-              placeholder="用户名" 
+              placeholder="用户名 / 学号 / 职工号" 
               :prefix-icon="User"
               autocomplete="username" 
             />

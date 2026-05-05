@@ -11,7 +11,8 @@ import {
   Reading,
   User,
   PriceTag,
-  Filter
+  Filter,
+  Notebook
 } from '@element-plus/icons-vue'
 import api from '../api/client'
 
@@ -20,6 +21,7 @@ const router = useRouter()
 const loading = ref(false)
 const items = ref([])
 const status = ref('approved')
+const pagination = ref({ page: 1, pageSize: 12, total: 0 })
 
 const courses = ref([])
 const knowledgePoints = ref([])
@@ -92,14 +94,29 @@ async function fetchList() {
         course_id: isNumberValue(query.course_id) ? query.course_id : undefined,
         knowledge_point_id: isNumberValue(query.knowledge_point_id) ? query.knowledge_point_id : undefined,
         teacher_id: isNumberValue(query.teacher_id) ? query.teacher_id : undefined,
+        page: pagination.value.page,
+        page_size: pagination.value.pageSize,
       },
     })
     items.value = resp.data.items || []
+    pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载失败')
   } finally {
     loading.value = false
   }
+}
+
+function handlePageChange(page) {
+  pagination.value.page = page
+  pagination.value.page = 1
+  fetchList()
+}
+
+function handleSizeChange(size) {
+  pagination.value.pageSize = size
+  pagination.value.page = 1
+  fetchList()
 }
 
 async function download(item) {
@@ -155,112 +172,118 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="resource-container">
-    <!-- Filter Header -->
-    <el-card class="filter-card" shadow="never">
-      <div class="filter-grid">
-        <el-input 
-          v-model="query.keyword" 
-          placeholder="搜索资源标题/描述" 
-          :prefix-icon="Search"
-          clearable 
-          @change="fetchList"
-          class="filter-item"
-        />
-        
-        <el-select v-model="query.course_id" clearable placeholder="所属课程" class="filter-item">
-          <template #prefix><el-icon><Reading /></el-icon></template>
-          <el-option v-for="c in courses" :key="c.id" :label="c.name" :value="c.id" />
-        </el-select>
+  <div class="page-view resource-page">
+    <el-card class="main-card resource-shell" shadow="hover">
+      <template #header>
+        <div class="page-toolbar resource-toolbar">
+          <div class="page-toolbar__title title-section">
+            <el-icon :size="22" class="title-icon"><Notebook /></el-icon>
+            <div class="title-block">
+              <span class="title">资源中心</span>
+              <span class="title-hint">搜索、筛选、收藏与下载学习资源</span>
+            </div>
+          </div>
+          <div class="toolbar-actions">
+            <el-button type="primary" :icon="Search" @click="fetchList">搜索</el-button>
+            <el-button :icon="Refresh" @click="resetQuery">重置</el-button>
+          </div>
+        </div>
+      </template>
 
-        <el-select v-model="query.knowledge_point_id" clearable placeholder="关联知识点" class="filter-item" @change="fetchList">
-          <el-option v-for="k in knowledgePoints" :key="k.id" :label="k.name" :value="k.id" />
-        </el-select>
+      <div class="filter-card-soft">
+        <div class="filter-grid">
+          <el-input v-model="query.keyword" placeholder="搜索资源标题/描述" :prefix-icon="Search" clearable @change="fetchList" class="filter-item" />
+          <el-select v-model="query.course_id" clearable placeholder="所属课程" class="filter-item">
+            <template #prefix><el-icon><Reading /></el-icon></template>
+            <el-option v-for="c in courses" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+          <el-select v-model="query.knowledge_point_id" clearable placeholder="关联知识点" class="filter-item" @change="fetchList">
+            <el-option v-for="k in knowledgePoints" :key="k.id" :label="k.name" :value="k.id" />
+          </el-select>
+          <el-select v-model="query.teacher_id" clearable placeholder="授课教师" class="filter-item" @change="fetchList">
+            <template #prefix><el-icon><User /></el-icon></template>
+            <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
+          </el-select>
+          <el-input v-model="query.tag" placeholder="标签筛选" :prefix-icon="PriceTag" clearable @change="fetchList" class="filter-item" />
+        </div>
 
-        <el-select v-model="query.teacher_id" clearable placeholder="授课教师" class="filter-item" @change="fetchList">
-          <template #prefix><el-icon><User /></el-icon></template>
-          <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
-        </el-select>
-
-        <el-input 
-          v-model="query.tag" 
-          placeholder="标签筛选" 
-          :prefix-icon="PriceTag"
-          clearable 
-          @change="fetchList"
-          class="filter-item"
-        />
-
-        <div class="filter-actions">
-          <el-button type="primary" :icon="Search" @click="fetchList">搜索</el-button>
-          <el-button :icon="Refresh" @click="resetQuery">重置</el-button>
+        <div v-if="isDean" class="status-tabs">
+          <el-radio-group v-model="status" @change="fetchList">
+            <el-radio-button label="approved">已通过</el-radio-button>
+            <el-radio-button label="pending">待审核</el-radio-button>
+            <el-radio-button label="rejected">已拒绝</el-radio-button>
+          </el-radio-group>
         </div>
       </div>
 
-      <div v-if="isDean" class="status-tabs">
-        <el-radio-group v-model="status" @change="fetchList">
-          <el-radio-button label="approved">已通过</el-radio-button>
-          <el-radio-button label="pending">待审核</el-radio-button>
-          <el-radio-button label="rejected">已拒绝</el-radio-button>
-        </el-radio-group>
+      <div v-loading="loading" class="resource-grid">
+        <el-empty v-if="items.length === 0" description="暂无符合条件的资源" />
+
+        <el-row :gutter="20">
+          <el-col v-for="item in items" :key="item.id" :xs="24" :sm="12" :md="8" :lg="6">
+            <el-card class="resource-item-card" shadow="hover">
+              <div class="resource-type-icon">
+                <el-icon :size="40" color="#4564f5"><Notebook /></el-icon>
+              </div>
+
+              <div class="resource-content">
+                <h3 class="resource-title" @click="openDetail(item)">{{ item.title }}</h3>
+
+                <div class="resource-meta">
+                  <div class="meta-item">
+                    <el-icon><Reading /></el-icon>
+                    <span>{{ item.course || '通用课程' }}</span>
+                  </div>
+                </div>
+
+                <div class="resource-tags">
+                  <el-tag v-for="t in (item.tags || []).slice(0, 3)" :key="t" size="small" effect="plain">
+                    {{ t }}
+                  </el-tag>
+                </div>
+
+                <div class="resource-footer">
+                  <span class="date">{{ new Date(item.created_at).toLocaleDateString() }}</span>
+                  <div class="actions">
+                    <el-tooltip content="收藏" placement="top">
+                      <el-button v-if="canFavorite" circle size="small" :type="item.is_favorited ? 'warning' : 'default'" @click="favorite(item)">
+                        <el-icon><StarFilled v-if="item.is_favorited" /><Star v-else /></el-icon>
+                      </el-button>
+                    </el-tooltip>
+                    <el-tooltip content="下载" placement="top">
+                      <el-button circle size="small" :icon="Download" @click="download(item)" />
+                    </el-tooltip>
+                  </div>
+                </div>
+              </div>
+            </el-card>
+          </el-col>
+        </el-row>
+      </div>
+
+      <div class="table-pagination resource-pagination">
+        <el-pagination
+          v-model:current-page="pagination.page"
+          v-model:page-size="pagination.pageSize"
+          :total="pagination.total"
+          :page-sizes="[12, 24, 48, 96]"
+          layout="总数, sizes, prev, pager, next, jumper"
+          background
+          @current-change="handlePageChange"
+          @size-change="handleSizeChange"
+        />
       </div>
     </el-card>
-
-    <!-- Resource Grid -->
-    <div v-loading="loading" class="resource-grid">
-      <el-empty v-if="items.length === 0" description="暂无符合条件的资源" />
-      
-      <el-row :gutter="20">
-        <el-col v-for="item in items" :key="item.id" :xs="24" :sm="12" :md="8" :lg="6">
-          <el-card class="resource-item-card" shadow="hover">
-            <div class="resource-type-icon">
-              <el-icon :size="40" color="#409eff"><Notebook /></el-icon>
-            </div>
-            
-            <div class="resource-content">
-              <h3 class="resource-title" @click="openDetail(item)">{{ item.title }}</h3>
-              
-              <div class="resource-meta">
-                <div class="meta-item">
-                  <el-icon><Reading /></el-icon>
-                  <span>{{ item.course || '通用课程' }}</span>
-                </div>
-              </div>
-
-              <div class="resource-tags">
-                <el-tag v-for="t in (item.tags || []).slice(0, 3)" :key="t" size="small" effect="plain">
-                  {{ t }}
-                </el-tag>
-              </div>
-
-              <div class="resource-footer">
-                <span class="date">{{ new Date(item.created_at).toLocaleDateString() }}</span>
-                <div class="actions">
-                  <el-tooltip content="收藏" placement="top">
-                    <el-button 
-                      v-if="canFavorite" 
-                      circle 
-                      size="small" 
-                      :type="item.is_favorited ? 'warning' : 'default'"
-                      @click="favorite(item)"
-                    >
-                      <el-icon><StarFilled v-if="item.is_favorited" /><Star v-else /></el-icon>
-                    </el-button>
-                  </el-tooltip>
-                  <el-tooltip content="下载" placement="top">
-                    <el-button circle size="small" :icon="Download" @click="download(item)" />
-                  </el-tooltip>
-                </div>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-      </el-row>
-    </div>
   </div>
 </template>
 
 <style scoped>
+.resource-page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
 .resource-container {
   display: flex;
   flex-direction: column;

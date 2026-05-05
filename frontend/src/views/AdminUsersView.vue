@@ -24,6 +24,7 @@ const usersLoading = ref(false)
 const users = ref([])
 const userQuery = ref('')
 const roleFilter = ref('all')
+const usersPagination = ref({ page: 1, pageSize: 10, total: 0 })
 
 const rolesOfMe = computed(() => {
   try {
@@ -50,6 +51,13 @@ const roleFilterOptions = computed(() => {
 const rbacLoading = ref(false)
 const roles = ref([])
 const permissions = ref([])
+const pageOptions = ref([])
+const pageOptionMap = computed(() => new Map((pageOptions.value || []).map((p) => [p.value, p.label])))
+const pageGroups = computed(() => [
+  { title: '基础页面', items: (pageOptions.value || []).filter((p) => ['/', '/graph', '/profile'].includes(p.value)) },
+  { title: '学习与教学', items: (pageOptions.value || []).filter((p) => ['/learning', '/teacher/courses'].includes(p.value)) },
+  { title: '管理后台', items: (pageOptions.value || []).filter((p) => ['/admin/audit', '/admin/courses', '/admin/logs', '/admin/users'].includes(p.value)) },
+])
 
 const roleOptions = computed(() => (roles.value || []).map((r) => ({ label: r.name, value: r.name })))
 const allowedRoleOptions = computed(() => {
@@ -62,13 +70,32 @@ async function loadUsers() {
   usersLoading.value = true
   try {
     const role = roleFilter.value && roleFilter.value !== 'all' ? roleFilter.value : undefined
-    const resp = await api.get('/api/admin/users', { params: { q: userQuery.value || undefined, role } })
+    const resp = await api.get('/api/admin/users', {
+      params: {
+        q: userQuery.value || undefined,
+        role,
+        page: usersPagination.value.page,
+        page_size: usersPagination.value.pageSize,
+      },
+    })
     users.value = resp.data.items || []
+    usersPagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载用户失败')
   } finally {
     usersLoading.value = false
   }
+}
+
+function handleUsersPageChange(page) {
+  usersPagination.value.page = page
+  loadUsers()
+}
+
+function handleUsersSizeChange(size) {
+  usersPagination.value.pageSize = size
+  usersPagination.value.page = 1
+  loadUsers()
 }
 
 async function loadRbac() {
@@ -77,6 +104,7 @@ async function loadRbac() {
     const resp = await api.get('/api/admin/rbac')
     roles.value = resp.data.roles || []
     permissions.value = resp.data.permissions || []
+    pageOptions.value = resp.data.page_options || []
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载RBAC失败')
   } finally {
@@ -147,6 +175,10 @@ function openCreate() {
   createOpen.value = true
 }
 
+function resetUsersPagination() {
+  usersPagination.value.page = 1
+}
+
 async function submitCreate() {
   const username = (createForm.value.username || '').trim()
   const password = (createForm.value.password || '').trim()
@@ -164,6 +196,7 @@ async function submitCreate() {
     })
     ElMessage.success('账号创建成功')
     createOpen.value = false
+    resetUsersPagination()
     await loadUsers()
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '创建失败')
@@ -219,6 +252,9 @@ async function removeUser(row) {
   try {
     await api.delete(`/api/admin/users/${row.id}`)
     ElMessage.success('账号已删除')
+    if (usersPagination.value.page > 1 && users.value.length === 1) {
+      usersPagination.value.page -= 1
+    }
     await loadUsers()
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '删除失败')
@@ -226,15 +262,17 @@ async function removeUser(row) {
 }
 
 const roleEditOpen = ref(false)
-const roleEditForm = ref({ id: null, name: '', permission_codes: [] })
-const newPermCode = ref('')
+const roleEditForm = ref({ id: null, name: '', visible_pages: [], default_visible_pages: [] })
+const tempRolePages = ref([])
 
 function openRoleEdit(row) {
   roleEditForm.value = {
     id: row.id,
     name: row.name,
-    permission_codes: Array.isArray(row.permissions) ? [...row.permissions] : [],
+    visible_pages: Array.isArray(row.visible_pages) ? [...row.visible_pages] : [],
+    default_visible_pages: Array.isArray(row.default_visible_pages) ? [...row.default_visible_pages] : [],
   }
+  tempRolePages.value = [...roleEditForm.value.visible_pages]
   roleEditOpen.value = true
 }
 
@@ -242,8 +280,8 @@ async function submitRolePerms() {
   const id = roleEditForm.value.id
   if (!id) return
   try {
-    await api.put(`/api/admin/roles/${id}/permissions`, { permission_codes: roleEditForm.value.permission_codes || [] })
-    ElMessage.success('权限更新成功')
+    await api.put(`/api/admin/roles/${id}/pages`, { visible_pages: tempRolePages.value || [] })
+    ElMessage.success('角色页面配置已更新')
     roleEditOpen.value = false
     await loadRbac()
   } catch (e) {
@@ -251,17 +289,10 @@ async function submitRolePerms() {
   }
 }
 
-async function createPermission() {
-  const code = (newPermCode.value || '').trim()
-  if (!code) return
-  try {
-    await api.post('/api/admin/permissions', { code })
-    newPermCode.value = ''
-    await loadRbac()
-    ElMessage.success('新增权限码成功')
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.error?.message || '新增权限码失败')
-  }
+function resetVisiblePagesToDefault() {
+  tempRolePages.value = Array.isArray(roleEditForm.value.default_visible_pages)
+    ? [...roleEditForm.value.default_visible_pages]
+    : []
 }
 
 onMounted(async () => {
@@ -327,18 +358,17 @@ onMounted(async () => {
                 </div>
               </template>
             </el-table-column>
+            <el-table-column label="工号/学号" min-width="120">
+              <template #default="{ row }">
+                {{ row.business_id || '-' }}
+              </template>
+            </el-table-column>
             <el-table-column label="所属角色" min-width="180">
               <template #default="{ row }">
                 <div class="role-tags">
                   <el-tag v-for="r in row.roles || []" :key="r" size="small" effect="plain">{{ r }}</el-tag>
                   <span v-if="!(row.roles || []).length">-</span>
                 </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="班级信息" width="160">
-              <template #default="{ row }">
-                <el-tag v-if="row.class_name" type="info" size="small" round>{{ row.class_name }}</el-tag>
-                <span v-else>-</span>
               </template>
             </el-table-column>
             <el-table-column label="账号状态" width="110" align="center">
@@ -362,46 +392,65 @@ onMounted(async () => {
               </template>
             </el-table-column>
           </el-table>
+          <div class="table-pagination">
+            <el-pagination
+              v-model:current-page="usersPagination.page"
+              v-model:page-size="usersPagination.pageSize"
+              :total="usersPagination.total"
+              :page-sizes="[10, 20, 50, 100]"
+              layout="total, sizes, prev, pager, next, jumper"
+              background
+              @current-change="handleUsersPageChange"
+              @size-change="handleUsersSizeChange"
+            />
+          </div>
         </el-tab-pane>
 
         <!-- RBAC Management -->
         <el-tab-pane v-if="isSystemAdmin" label="角色与权限定义" name="rbac">
-          <div class="rbac-toolbar">
-            <el-input 
-              v-model="newPermCode" 
-              placeholder="请输入新的权限码（例如: resource.delete）" 
-              style="width: 360px" 
-              clearable 
-              :prefix-icon="Key"
-            />
-            <el-button type="primary" :icon="Plus" @click="createPermission">新增权限码</el-button>
-          </div>
-
-          <el-table :data="roles" v-loading="rbacLoading" border stripe style="width: 100%" class="data-table">
-            <el-table-column prop="name" label="角色名称" width="180">
-              <template #default="{ row }">
-                <div class="role-cell">
+          <el-card shadow="never" class="role-pages-card">
+            <template #header>
+              <div class="card-header">
+                <div class="title-section">
                   <el-icon><Lock /></el-icon>
-                  <span>{{ row.name }}</span>
+                  <span>角色页面分配</span>
                 </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="关联权限码列表" min-width="400">
-              <template #default="{ row }">
-                <div class="perm-tags">
-                  <el-tag v-for="p in row.permissions || []" :key="p" size="small" type="warning" effect="plain">
-                    {{ p }}
-                  </el-tag>
-                  <span v-if="!(row.permissions || []).length" class="empty-text">未配置权限</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="管理" width="140" align="center">
-              <template #default="{ row }">
-                <el-button size="small" :icon="Edit" @click="openRoleEdit(row)">配置权限</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+              </div>
+            </template>
+            <el-alert
+              title="角色页面权限配置"
+              type="success"
+              description="只需在这里为每个角色勾选可见页面；其他角色限制已移除。"
+              :closable="false"
+              show-icon
+              style="margin-bottom: 18px"
+            />
+            <el-table :data="roles" v-loading="rbacLoading" border stripe style="width: 100%" class="data-table">
+              <el-table-column prop="name" label="角色名称" width="180">
+                <template #default="{ row }">
+                  <div class="role-cell">
+                    <el-icon><Lock /></el-icon>
+                    <span>{{ row.name }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="可显示页面" min-width="400">
+                <template #default="{ row }">
+                  <div class="perm-tags">
+                    <el-tag v-for="p in row.visible_pages || []" :key="p" size="small" type="success" effect="plain">
+                      {{ pageOptionMap.get(p) || p }}
+                    </el-tag>
+                    <span v-if="!(row.visible_pages || []).length" class="empty-text">未配置页面</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="管理" width="140" align="center">
+                <template #default="{ row }">
+                  <el-button size="small" :icon="Edit" @click="openRoleEdit(row)">配置</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
         </el-tab-pane>
       </el-tabs>
     </el-card>
@@ -426,11 +475,6 @@ onMounted(async () => {
               <el-switch v-model="createForm.is_active" active-text="启用" inactive-text="禁用" />
             </el-form-item>
           </el-col>
-          <el-col :span="12" v-if="createForm.roles.includes('student')">
-            <el-form-item label="所属班级">
-              <el-input v-model="createForm.class_name" placeholder="如: 计科2101" />
-            </el-form-item>
-          </el-col>
         </el-row>
       </el-form>
       <template #footer>
@@ -451,14 +495,9 @@ onMounted(async () => {
           </el-select>
         </el-form-item>
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :span="24">
             <el-form-item label="账号状态">
               <el-switch v-model="editForm.is_active" active-text="启用" inactive-text="禁用" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12" v-if="editForm.roles.includes('student')">
-            <el-form-item label="班级信息">
-              <el-input v-model="editForm.class_name" placeholder="如: 计科2101" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -473,25 +512,27 @@ onMounted(async () => {
     </el-dialog>
 
     <!-- Role Permissions Dialog -->
-    <el-dialog v-model="roleEditOpen" title="配置角色权限" width="600px">
+    <el-dialog v-model="roleEditOpen" title="配置角色页面" width="760px">
       <el-form :model="roleEditForm" label-position="top">
         <el-form-item label="正在编辑的角色">
           <el-tag effect="dark" type="warning">{{ roleEditForm.name }}</el-tag>
         </el-form-item>
-        <el-form-item label="勾选/搜索权限码">
-          <el-select 
-            v-model="roleEditForm.permission_codes" 
-            multiple 
-            filterable 
-            style="width: 100%" 
-            placeholder="请选择权限码"
-          >
-            <el-option v-for="opt in permissionOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
-          </el-select>
+        <el-form-item label="该角色可显示页面">
+          <div class="page-group-list">
+            <div v-for="group in pageGroups" :key="group.title" class="page-group-card">
+              <div class="page-group-title">{{ group.title }}</div>
+              <el-checkbox-group v-model="tempRolePages" class="page-checkbox-group">
+                <el-checkbox v-for="opt in group.items" :key="opt.value" :label="opt.value">
+                  {{ opt.label }} <span class="page-path">({{ opt.value }})</span>
+                </el-checkbox>
+              </el-checkbox-group>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="roleEditOpen = false">取消</el-button>
+        <el-button @click="resetVisiblePagesToDefault">恢复默认</el-button>
         <el-button type="primary" @click="submitRolePerms">应用更改</el-button>
       </template>
     </el-dialog>
@@ -502,7 +543,7 @@ onMounted(async () => {
         <el-alert
           title="导入说明"
           type="info"
-          description="请上传 CSV 或 Excel (.xlsx) 文件。文件必须包含：username, password, roles (角色名，多个用逗号分隔) 字段。学生角色可选填 class_name。"
+          description="请上传 CSV 或 Excel (.xlsx) 文件。文件必须包含：username, password, roles (角色名，多个用逗号分隔) 字段。"
           show-icon
           :closable="false"
           style="margin-bottom: 20px"

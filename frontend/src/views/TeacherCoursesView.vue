@@ -1090,9 +1090,14 @@ onMounted(async () => {
                   {{ row.section || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column prop="knowledge_point" label="知识点" width="140">
+              <el-table-column label="知识点" width="160">
                 <template #default="{ row }">
-                  {{ row.knowledge_point || '-' }}
+                  <template v-if="(row.knowledge_points || []).length > 0">
+                    <el-tag v-for="kp in row.knowledge_points" :key="kp.id" size="small" type="success" style="margin-right: 4px">
+                      {{ kp.name }}
+                    </el-tag>
+                  </template>
+                  <span v-else>{{ row.knowledge_point || '-' }}</span>
                 </template>
               </el-table-column>
               <el-table-column label="智能建议" width="180">

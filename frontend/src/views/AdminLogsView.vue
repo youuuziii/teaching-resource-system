@@ -5,6 +5,7 @@ import api from '../api/client'
 
 const loading = ref(false)
 const items = ref([])
+const pagination = ref({ page: 1, pageSize: 20, total: 0 })
 
 const isAdmin = computed(() => {
   try {
@@ -18,8 +19,14 @@ const isAdmin = computed(() => {
 async function fetchLogs() {
   loading.value = true
   try {
-    const resp = await api.get('/api/admin/logs')
+    const resp = await api.get('/api/admin/logs', {
+      params: {
+        page: pagination.value.page,
+        page_size: pagination.value.pageSize,
+      },
+    })
     items.value = resp.data.items || []
+    pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载失败')
   } finally {
@@ -27,11 +34,22 @@ async function fetchLogs() {
   }
 }
 
+function handlePageChange(page) {
+  pagination.value.page = page
+  fetchLogs()
+}
+
+function handleSizeChange(size) {
+  pagination.value.pageSize = size
+  pagination.value.page = 1
+  fetchLogs()
+}
+
 onMounted(fetchLogs)
 </script>
 
 <template>
-  <el-card>
+  <el-card class="main-card logs-fixed" shadow="hover">
     <template #header>
       <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
         <div style="font-weight: 600">系统日志</div>
@@ -52,5 +70,17 @@ onMounted(fetchLogs)
         </template>
       </el-table-column>
     </el-table>
+    <div class="table-pagination">
+      <el-pagination
+        v-model:current-page="pagination.page"
+        v-model:page-size="pagination.pageSize"
+        :total="pagination.total"
+        :page-sizes="[20, 50, 100]"
+        layout="总数, sizes, prev, pager, next, jumper"
+        background
+        @current-change="handlePageChange"
+        @size-change="handleSizeChange"
+      />
+    </div>
   </el-card>
 </template>
