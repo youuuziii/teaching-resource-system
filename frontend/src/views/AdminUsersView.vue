@@ -358,9 +358,9 @@ onMounted(async () => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="工号/学号" min-width="120">
+            <el-table-column label="工号/学号" min-width="140">
               <template #default="{ row }">
-                {{ row.business_id || '-' }}
+                {{ row.student_id || row.teacher_id || row.dean_id || row.admin_id || '-' }}
               </template>
             </el-table-column>
             <el-table-column label="所属角色" min-width="180">

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import { useRoute, useRouter } from 'vue-router'
 import { Collection, Share, User, UserFilled, Setting, Checked, Management, Memo, SwitchButton, Notebook } from '@element-plus/icons-vue'
@@ -8,15 +8,21 @@ import logo from './assets/logo.png'
 const route = useRoute()
 const router = useRouter()
 
-const user = computed(() => {
+const readStoredUser = () => {
   try {
     return JSON.parse(localStorage.getItem('user') || '{}')
   } catch {
     return {}
   }
-})
+}
 
-const token = computed(() => localStorage.getItem('token') || '')
+const readStoredToken = () => localStorage.getItem('token') || ''
+
+const userState = ref(readStoredUser())
+const tokenState = ref(readStoredToken())
+
+const user = computed(() => userState.value || {})
+const token = computed(() => tokenState.value || '')
 const isAuthed = computed(() => token.value.length > 0)
 const roles = computed(() => Array.isArray(user.value.roles) ? user.value.roles : [])
 const elementLocale = zhCn
@@ -26,6 +32,15 @@ const isDean = computed(() => roles.value.includes('dean'))
 const isStudent = computed(() => roles.value.includes('student'))
 const isTeacherOnly = computed(() => roles.value.includes('teacher') && !roles.value.includes('admin') && !roles.value.includes('dean'))
 
+function syncAuthState() {
+  userState.value = readStoredUser()
+  tokenState.value = readStoredToken()
+}
+
+function handleUserUpdated() {
+  syncAuthState()
+}
+
 function go(path) {
   router.push(path)
 }
@@ -33,8 +48,21 @@ function go(path) {
 function logout() {
   localStorage.removeItem('token')
   localStorage.removeItem('user')
+  syncAuthState()
+  window.dispatchEvent(new Event('user-updated'))
   router.push('/login')
 }
+
+onMounted(() => {
+  window.addEventListener('user-updated', handleUserUpdated)
+  window.addEventListener('storage', handleUserUpdated)
+  syncAuthState()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('user-updated', handleUserUpdated)
+  window.removeEventListener('storage', handleUserUpdated)
+})
 </script>
 
 <template>

@@ -28,7 +28,7 @@ async function submit() {
     localStorage.setItem('user', JSON.stringify(resp.data.user))
     window.dispatchEvent(new Event('user-updated'))
     ElMessage.success('欢迎回来')
-    router.push('/')
+    router.replace('/')
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '登录失败，请检查账号密码')
   } finally {

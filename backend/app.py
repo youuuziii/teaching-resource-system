@@ -296,9 +296,8 @@ class Teacher(Base):
 class Student(Base):
     __tablename__ = "students"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
-    student_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     class_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -308,6 +307,15 @@ class Dean(Base):
     __tablename__ = "deans"
 
     dean_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+
+class Admin(Base):
+    __tablename__ = "admins"
+
+    admin_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
@@ -440,6 +448,9 @@ class Notification(Base):
     user: Mapped[User] = relationship("User")
 
 
+SESSION_LOCAL = None
+
+
 def _create_app() -> Flask:
     settings = Settings.from_env()
 
@@ -449,6 +460,8 @@ def _create_app() -> Flask:
 
     engine = create_engine(settings.database_url, future=True)
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
+    global SESSION_LOCAL
+    SESSION_LOCAL = SessionLocal
 
     neo4j_driver = None
     if settings.neo4j_uri:
@@ -1611,7 +1624,7 @@ def _create_app() -> Flask:
                     conn.commit()
 
     def make_token(user: User) -> str:
-        now = dt.datetime.utcnow()
+        now = dt.datetime.now(dt.UTC)
         payload = {
             "sub": str(user.id),
             "username": user.username,
@@ -1706,14 +1719,14 @@ def _create_app() -> Flask:
         if teacher_id is not None:
             return db.get(Teacher, teacher_id)
         if teacher_name:
-            name = teacher_name.strip()
-            if name:
-                existing = db.execute(select(Teacher).where(Teacher.name == name)).scalar_one_or_none()
+            sid = teacher_name.strip()
+            if sid:
+                existing = db.execute(select(Teacher).where(Teacher.teacher_id == sid)).scalar_one_or_none()
                 if existing:
                     return existing
                 if not allow_create:
                     raise ApiError("FORBIDDEN", "Only teacher/admin can create new teachers", 403)
-                t = Teacher(name=name)
+                t = Teacher(teacher_id=sid, name=sid)
                 db.add(t)
                 db.flush()
                 return t
@@ -1793,14 +1806,17 @@ def _create_app() -> Flask:
                 db.flush()
                 return k
 
-            def ensure_teacher(name: str, email: Optional[str]) -> Teacher:
-                existing = db.execute(select(Teacher).where(Teacher.name == name)).scalar_one_or_none()
+            def ensure_teacher(teacher_id: str, name: str, email: Optional[str]) -> Teacher:
+                existing = db.execute(select(Teacher).where(Teacher.teacher_id == teacher_id)).scalar_one_or_none()
                 if existing:
                     if email and not existing.email:
                         existing.email = email
                         db.flush()
+                    if name and not existing.name:
+                        existing.name = name
+                        db.flush()
                     return existing
-                t = Teacher(name=name, email=email)
+                t = Teacher(teacher_id=teacher_id, name=name, email=email)
                 db.add(t)
                 db.flush()
                 return t
@@ -1888,10 +1904,11 @@ def _create_app() -> Flask:
 
             # Use the auto-created teacher profile for the 'teacher' user
             t_demo = db.execute(select(Teacher).where(Teacher.user_id == teacher_user.id)).scalar_one()
-            t_demo.name = "张老师" # Rename it to match the expected demo name
+            t_demo.name = "张老师"
+            t_demo.teacher_id = "teacher"
             db.flush()
             t_zhang = t_demo
-            t_li = ensure_teacher("李老师", "li@example.com")
+            t_li = ensure_teacher("teacher02", "李老师", "li@example.com")
 
             # ensure course-teacher assignments
             def ensure_course_teacher(course: Course, teacher: Teacher) -> None:
@@ -3113,10 +3130,10 @@ def _create_app() -> Flask:
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"teacher", "dean"})
-            existing = db.execute(select(Teacher).where(Teacher.name == name)).scalar_one_or_none()
+            existing = db.execute(select(Teacher).where(Teacher.teacher_id == name)).scalar_one_or_none()
             if existing:
                 return jsonify({"teacher": {"id": existing.id, "name": existing.name, "email": existing.email}})
-            t = Teacher(name=name, email=email)
+            t = Teacher(teacher_id=name, name=name, email=email)
             db.add(t)
             db.commit()
             db.refresh(t)
@@ -3149,7 +3166,7 @@ def _create_app() -> Flask:
             db.commit()
             db.refresh(new_user)
 
-            return jsonify({"token": make_token(new_user), "user": _user_dto(new_user)})
+            return jsonify({"token": make_token(new_user), "user": _user_dto_with_session(new_user, db)})
 
     def _password_matches(stored: str, supplied: str) -> bool:
         if not stored:
@@ -3191,13 +3208,13 @@ def _create_app() -> Flask:
                 raise ApiError("UNAUTHORIZED", "Invalid credentials", 401)
             if not user.is_active:
                 raise ApiError("FORBIDDEN", "User disabled", 403)
-            return jsonify({"token": make_token(user), "user": _user_dto(user)})
+            return jsonify({"token": make_token(user), "user": _user_dto_with_session(user, db)})
 
     @app.get("/api/me")
     def me():
         with SessionLocal() as db:
             user = require_auth(db)
-            return jsonify({"user": _user_dto(user)})
+            return jsonify({"user": _user_dto_with_session(user, db)})
 
     @app.get("/api/notifications")
     def list_notifications():
@@ -3350,18 +3367,13 @@ def _create_app() -> Flask:
             # Find all teacher profiles linked to this user or with the same name if unlinked
             teacher_ids_stmt = select(Teacher.teacher_id).where(Teacher.user_id == user.id)
             teacher_ids = set(db.execute(teacher_ids_stmt).scalars().all())
-            
-            # Fallback: teachers with same name but no user_id
-            fallback_stmt = select(Teacher.teacher_id).where(Teacher.name == user.username).where(Teacher.user_id.is_(None))
-            teacher_ids.update(db.execute(fallback_stmt).scalars().all())
 
             if not teacher_ids:
-                # Still try to ensure a profile exists
                 _ensure_user_profiles(db, user, ["teacher"])
                 db.commit()
                 t = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
                 if t:
-                    teacher_ids.add(t.id)
+                    teacher_ids.add(t.teacher_id)
                 else:
                     raise ApiError("FORBIDDEN", "teacher profile not found", 403)
 
@@ -4076,7 +4088,7 @@ def _create_app() -> Flask:
             res.status = status
             res.audit_comment = comment
             res.audited_by = user.id
-            res.audited_at = dt.datetime.utcnow()
+            res.audited_at = dt.datetime.now(dt.UTC)
 
             if res.status == "approved":
                 # 审核通过时，同步关联的所有知识点到 Neo4j
@@ -4447,7 +4459,7 @@ def _create_app() -> Flask:
                             .all()
                         )
                 elif node_type == "teacher":
-                    t = db.execute(select(Teacher).where(Teacher.name == raw)).scalar_one_or_none()
+                    t = db.execute(select(Teacher).where(Teacher.teacher_id == raw)).scalar_one_or_none()
                     if t:
                         resource_ids = (
                             db.execute(
@@ -4600,19 +4612,46 @@ def _create_app() -> Flask:
         if "teacher" in roles:
             t = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
             if not t:
-                t2 = db.execute(select(Teacher).where(Teacher.name == username)).scalar_one_or_none()
+                t2 = db.execute(select(Teacher).where(Teacher.teacher_id == username)).scalar_one_or_none()
                 if t2 and t2.user_id is None:
                     t2.user_id = user.id
                 elif not t2:
-                    db.add(Teacher(user_id=user.id, name=username))
+                    db.add(Teacher(user_id=user.id, teacher_id=username, name=username))
 
-    def _user_dto(u: User) -> Dict[str, Any]:
-        return {
+        if "admin" in roles:
+            a = db.execute(select(Admin).where(Admin.user_id == user.id)).scalar_one_or_none()
+            if not a:
+                a2 = db.execute(select(Admin).where(Admin.admin_id == username)).scalar_one_or_none()
+                if a2 and a2.user_id is None:
+                    a2.user_id = user.id
+                elif not a2:
+                    db.add(Admin(user_id=user.id, admin_id=username, name=username))
+
+    def _user_dto_with_session(u: User, db: Session) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
             "id": u.id,
             "username": u.username,
             "roles": [r.name for r in u.roles],
             "phone": u.phone,
         }
+        roles = {r.name for r in u.roles}
+        if "student" in roles:
+            s = db.execute(select(Student).where(Student.user_id == u.id)).scalar_one_or_none()
+            if s:
+                data["student_id"] = s.student_id
+        if "teacher" in roles:
+            t = db.execute(select(Teacher).where(Teacher.user_id == u.id)).scalar_one_or_none()
+            if t:
+                data["teacher_id"] = t.teacher_id
+        if "dean" in roles:
+            d = db.execute(select(Dean).where(Dean.user_id == u.id)).scalar_one_or_none()
+            if d:
+                data["dean_id"] = d.dean_id
+        if "admin" in roles:
+            a = db.execute(select(Admin).where(Admin.user_id == u.id)).scalar_one_or_none()
+            if a:
+                data["admin_id"] = a.admin_id
+        return data
 
     def _user_admin_dto(u: User, db: Session) -> Dict[str, Any]:
         data = {
@@ -4626,7 +4665,20 @@ def _create_app() -> Flask:
         if "student" in roles:
             s = db.execute(select(Student).where(Student.user_id == u.id)).scalar_one_or_none()
             if s:
+                data["student_id"] = s.student_id
                 data["class_name"] = s.class_name
+        if "teacher" in roles:
+            t = db.execute(select(Teacher).where(Teacher.user_id == u.id)).scalar_one_or_none()
+            if t:
+                data["teacher_id"] = t.teacher_id
+        if "dean" in roles:
+            d = db.execute(select(Dean).where(Dean.user_id == u.id)).scalar_one_or_none()
+            if d:
+                data["dean_id"] = d.dean_id
+        if "admin" in roles:
+            a = db.execute(select(Admin).where(Admin.user_id == u.id)).scalar_one_or_none()
+            if a:
+                data["admin_id"] = a.admin_id
         return data
 
     @app.get("/api/admin/users")
@@ -5126,7 +5178,24 @@ def _split_names(raw: str) -> List[str]:
 
 
 def _user_dto(u: User) -> Dict[str, Any]:
-    return {"id": u.id, "username": u.username, "roles": [r.name for r in u.roles], "phone": u.phone}
+    data: Dict[str, Any] = {"id": u.id, "username": u.username, "roles": [r.name for r in u.roles], "phone": u.phone}
+    if SESSION_LOCAL is None:
+        return data
+    roles = set(data["roles"])
+    with SESSION_LOCAL() as db:
+        if "student" in roles:
+            s = db.execute(select(Student).where(Student.user_id == u.id)).scalar_one_or_none()
+            if s:
+                data["student_id"] = s.student_id
+        if "teacher" in roles:
+            t = db.execute(select(Teacher).where(Teacher.user_id == u.id)).scalar_one_or_none()
+            if t:
+                data["teacher_id"] = t.teacher_id
+        if "dean" in roles:
+            d = db.execute(select(Dean).where(Dean.user_id == u.id)).scalar_one_or_none()
+            if d:
+                data["dean_id"] = d.dean_id
+    return data
 
 
 def _resource_dto(r: Resource) -> Dict[str, Any]:

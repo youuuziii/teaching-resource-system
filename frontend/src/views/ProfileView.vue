@@ -43,12 +43,15 @@ const isStudent = computed(() => roles.value.includes('student'))
 
 const idLabel = computed(() => {
   if (roles.value.includes('student')) return '学号'
-  return '工号'
+  if (roles.value.includes('teacher')) return '工号'
+  if (roles.value.includes('dean')) return '工号'
+  if (roles.value.includes('admin')) return '工号'
+  return '账号'
 })
 
 const displayId = computed(() => {
   if (!user.value) return '-'
-  return user.value.student_id || user.value.teacher_id || user.value.dean_id || user.value.id
+  return user.value.student_id || user.value.teacher_id || user.value.dean_id || user.value.admin_id || user.value.id
 })
 
 const displayName = computed(() => {
