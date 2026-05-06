@@ -26,6 +26,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    delete,
     MetaData,
     String,
     Text,
@@ -67,6 +68,7 @@ class Settings:
     llm_api_key: Optional[str]
     llm_base_url: str
     llm_model: str
+    system_log_retention_days: int
 
     @staticmethod
     def from_env() -> "Settings":
@@ -94,6 +96,7 @@ class Settings:
             llm_api_key=os.getenv("LLM_API_KEY"),
             llm_base_url=os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
             llm_model=os.getenv("LLM_MODEL", "qwen-plus"),
+            system_log_retention_days=max(1, int(os.getenv("SYSTEM_LOG_RETENTION_DAYS", "7"))),
         )
 
 
@@ -131,18 +134,18 @@ class Role(Base):
     name: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
 
     users: Mapped[List[User]] = relationship("User", secondary="user_roles", back_populates="roles")
-    permissions: Mapped[List["Permission"]] = relationship(
-        "Permission", secondary="role_permissions", back_populates="roles"
-    )
+    pages: Mapped[List["Page"]] = relationship("Page", secondary="role_pages", back_populates="roles")
 
 
-class Permission(Base):
-    __tablename__ = "permissions"
+class Page(Base):
+    __tablename__ = "pages"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    path: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    component: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
-    roles: Mapped[List[Role]] = relationship("Role", secondary="role_permissions", back_populates="permissions")
+    roles: Mapped[List[Role]] = relationship("Role", secondary="role_pages", back_populates="pages")
 
 
 class UserRole(Base):
@@ -154,13 +157,13 @@ class UserRole(Base):
     role_id: Mapped[int] = mapped_column(ForeignKey("roles.id"), nullable=False)
 
 
-class RolePermission(Base):
-    __tablename__ = "role_permissions"
-    __table_args__ = (UniqueConstraint("role_id", "permission_id"),)
+class RolePage(Base):
+    __tablename__ = "role_pages"
+    __table_args__ = (UniqueConstraint("role_id", "page_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     role_id: Mapped[int] = mapped_column(ForeignKey("roles.id"), nullable=False)
-    permission_id: Mapped[int] = mapped_column(ForeignKey("permissions.id"), nullable=False)
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), nullable=False)
 
 
 class Course(Base):
@@ -169,7 +172,6 @@ class Course(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    department: Mapped[Optional[str]] = mapped_column(String(120), nullable=True) # deprecated
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
@@ -603,14 +605,19 @@ def _create_app() -> Flask:
         except Exception:
             return
 
-    def _neo4j_upsert_course_teacher(course_id: int, teacher_id: int) -> None:
+    def _neo4j_upsert_course_teacher(course_id: int, teacher_id: Any) -> None:
         if not neo4j_driver:
             return
         try:
             _neo4j_ensure_constraints()
             with SessionLocal() as db:
                 course = db.get(Course, course_id)
-                teacher = db.get(Teacher, teacher_id)
+                teacher = teacher_id if isinstance(teacher_id, Teacher) else None
+                if teacher is None:
+                    if isinstance(teacher_id, int):
+                        teacher = db.get(Teacher, teacher_id)
+                    else:
+                        teacher = db.execute(select(Teacher).where(Teacher.teacher_id == str(teacher_id))).scalar_one_or_none()
                 if not course or not teacher:
                     return
                 with neo4j_driver.session() as session:
@@ -1528,23 +1535,6 @@ def _create_app() -> Flask:
 
         if "course_majors" not in insp.get_table_names():
             Base.metadata.tables["course_majors"].create(engine_, checkfirst=True)
-            # Migration: if courses has department, or course_departments exists, try to fill course_majors
-            with engine_.connect() as conn:
-                # 尝试从旧表迁移数据
-                if "course_departments" in insp.get_table_names():
-                    old_data = conn.exec_driver_sql("SELECT course_id, department FROM course_departments").fetchall()
-                    for cid, dept_name in old_data:
-                        # 先确保专业存在
-                        conn.exec_driver_sql("INSERT OR IGNORE INTO majors (name) VALUES (%s)", (dept_name,))
-                        mid = conn.exec_driver_sql("SELECT id FROM majors WHERE name = %s", (dept_name,)).scalar()
-                        if mid:
-                            conn.exec_driver_sql("INSERT OR IGNORE INTO course_majors (course_id, major_id) VALUES (%s, %s)", (cid, mid))
-                conn.commit()
-
-        if "course_departments" in insp.get_table_names():
-            with engine_.connect() as conn:
-                conn.exec_driver_sql("DROP TABLE course_departments")
-                conn.commit()
 
 
         if "notifications" not in insp.get_table_names():
@@ -1572,9 +1562,9 @@ def _create_app() -> Flask:
 
         if "courses" in insp.get_table_names():
             cols = {c["name"] for c in insp.get_columns("courses")}
-            if "department" not in cols:
+            if "department" in cols:
                 with engine_.connect() as conn:
-                    conn.exec_driver_sql("ALTER TABLE courses ADD COLUMN department VARCHAR(120)")
+                    conn.exec_driver_sql("ALTER TABLE courses DROP COLUMN department")
                     conn.commit()
 
         if "deans" in insp.get_table_names():
@@ -1666,6 +1656,28 @@ def _create_app() -> Flask:
         user_roles = {r.name for r in user.roles}
         if not user_roles.intersection(set(allowed)):
             raise ApiError("FORBIDDEN", "Insufficient role", 403)
+
+    def _role_pages(db: Session, user: User) -> List[Dict[str, Any]]:
+        roles = [r.name for r in (user.roles or [])]
+        pages = (
+            db.execute(
+                select(Page)
+                .join(RolePage, RolePage.page_id == Page.id)
+                .join(Role, Role.id == RolePage.role_id)
+                .where(Role.name.in_(roles))
+                .order_by(Page.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        seen: set[str] = set()
+        out: List[Dict[str, Any]] = []
+        for p in pages:
+            if p.path in seen:
+                continue
+            seen.add(p.path)
+            out.append({"id": p.id, "name": p.name, "path": p.path, "component": p.component})
+        return out
 
     def _parse_int(v: Optional[str]) -> Optional[int]:
         if v is None:
@@ -1913,7 +1925,7 @@ def _create_app() -> Flask:
             # ensure course-teacher assignments
             def ensure_course_teacher(course: Course, teacher: Teacher) -> None:
                 exists = db.execute(
-                    select(CourseTeacher).where(CourseTeacher.course_id == course.id).where(CourseTeacher.teacher_id == teacher.id)
+                    select(CourseTeacher).where(CourseTeacher.course_id == course.id).where(CourseTeacher.teacher_id == teacher.teacher_id)
                 ).scalar_one_or_none()
                 if not exists:
                     db.add(CourseTeacher(course_id=course.id, teacher_id=teacher.teacher_id))
@@ -2584,9 +2596,9 @@ def _create_app() -> Flask:
             rows = db.execute(select(CourseTeacher).where(CourseTeacher.course_id == course_id)).scalars().all()
             items = []
             for ct in rows:
-                t = db.get(Teacher, ct.teacher_id)
+                t = db.execute(select(Teacher).where(Teacher.teacher_id == ct.teacher_id)).scalar_one_or_none()
                 if t:
-                    items.append({"id": t.id, "name": t.name, "email": t.email, "class_name": ct.class_name})
+                    items.append({"id": t.teacher_id, "teacher_id": t.teacher_id, "name": t.name, "email": t.email})
             return jsonify({"items": items})
 
     @app.put("/api/courses/<int:course_id>/teachers")
@@ -2604,26 +2616,26 @@ def _create_app() -> Flask:
                 raise ApiError("NOT_FOUND", "course not found", 404)
             
             # Clear existing assignments
-            db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == course_id)
-            )
             existing = db.execute(select(CourseTeacher).where(CourseTeacher.course_id == course_id)).scalars().all()
             for row in existing:
                 db.delete(row)
-            
+
             # Add new assignments
             for assign in assignments:
-                tid = assign.get("teacher_id")
+                tid_raw = assign.get("teacher_id")
                 cname = assign.get("class_name")
-                if not isinstance(tid, int):
-                    continue
-                t = db.get(Teacher, tid)
+                t = None
+                if isinstance(tid_raw, int):
+                    t = db.get(Teacher, tid_raw)
+                else:
+                    tid_str = str(tid_raw).strip()
+                    if tid_str:
+                        t = db.execute(select(Teacher).where(Teacher.teacher_id == tid_str)).scalar_one_or_none()
                 if not t:
                     continue
-                db.add(CourseTeacher(course_id=course_id, teacher_id=str(tid), class_name=cname))
-                _neo4j_upsert_course_teacher(course_id, tid)
+                db.add(CourseTeacher(course_id=course_id, teacher_id=t.teacher_id))
+                _neo4j_upsert_course_teacher(course_id, t.teacher_id)
 
-            
             db.commit()
             return jsonify({"ok": True})
 
@@ -2678,7 +2690,7 @@ def _create_app() -> Flask:
                     raise ApiError("FORBIDDEN", "teacher profile not found", 403)
                 assigned = (
                     db.execute(
-                        select(CourseTeacher).where(CourseTeacher.course_id == c.id).where(CourseTeacher.teacher_id == trow.id)
+                        select(CourseTeacher).where(CourseTeacher.course_id == c.id).where(CourseTeacher.teacher_id == trow.teacher_id)
                     )
                     .scalars()
                     .first()
@@ -2755,7 +2767,7 @@ def _create_app() -> Flask:
                 db.execute(
                     select(CourseTeacher)
                     .where(CourseTeacher.course_id == kp.course_id)
-                    .where(CourseTeacher.teacher_id == trow.id)
+                    .where(CourseTeacher.teacher_id == trow.teacher_id)
                 )
                 .scalars()
                 .first()
@@ -2788,7 +2800,7 @@ def _create_app() -> Flask:
                 db.execute(
                     select(CourseTeacher)
                     .where(CourseTeacher.course_id == kp.course_id)
-                    .where(CourseTeacher.teacher_id == trow.id)
+                    .where(CourseTeacher.teacher_id == trow.teacher_id)
                 )
                 .scalars()
                 .first()
@@ -2847,7 +2859,7 @@ def _create_app() -> Flask:
             if not trow:
                 raise ApiError("FORBIDDEN", "teacher profile not found", 403)
             assigned = db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == course_id).where(CourseTeacher.teacher_id == trow.id)
+                select(CourseTeacher).where(CourseTeacher.course_id == course_id).where(CourseTeacher.teacher_id == trow.teacher_id)
             ).scalars().first()
             if not assigned:
                 raise ApiError("FORBIDDEN", "not assigned to this course", 403)
@@ -2880,7 +2892,7 @@ def _create_app() -> Flask:
             if not trow:
                 raise ApiError("FORBIDDEN", "teacher profile not found", 403)
             assigned = db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.id)
+                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.teacher_id)
             ).scalars().first()
             if not assigned:
                 raise ApiError("FORBIDDEN", "not assigned to this course", 403)
@@ -2913,7 +2925,7 @@ def _create_app() -> Flask:
             if not trow:
                 raise ApiError("FORBIDDEN", "teacher profile not found", 403)
             assigned = db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.id)
+                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.teacher_id)
             ).scalars().first()
             if not assigned:
                 raise ApiError("FORBIDDEN", "not assigned to this course", 403)
@@ -2996,7 +3008,7 @@ def _create_app() -> Flask:
             if not trow:
                 raise ApiError("FORBIDDEN", "teacher profile not found", 403)
             assigned = db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.id)
+                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.teacher_id)
             ).scalars().first()
             if not assigned:
                 raise ApiError("FORBIDDEN", "not assigned to this course", 403)
@@ -3032,7 +3044,7 @@ def _create_app() -> Flask:
             if not chapter:
                 raise ApiError("NOT_FOUND", "chapter not found", 404)
             assigned = db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.id)
+                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.teacher_id)
             ).scalars().first()
             if not assigned:
                 raise ApiError("FORBIDDEN", "not assigned to this course", 403)
@@ -3068,7 +3080,7 @@ def _create_app() -> Flask:
             if not chapter:
                 raise ApiError("NOT_FOUND", "chapter not found", 404)
             assigned = db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.id)
+                select(CourseTeacher).where(CourseTeacher.course_id == chapter.course_id).where(CourseTeacher.teacher_id == trow.teacher_id)
             ).scalars().first()
             if not assigned:
                 raise ApiError("FORBIDDEN", "not assigned to this course", 403)
@@ -3494,7 +3506,7 @@ def _create_app() -> Flask:
                 db.execute(
                     select(CourseTeacher)
                     .where(CourseTeacher.course_id == course_obj.id)
-                    .where(CourseTeacher.teacher_id == trow.id)
+                    .where(CourseTeacher.teacher_id == trow.teacher_id)
                 )
                 .scalars()
                 .first()
@@ -3801,7 +3813,7 @@ def _create_app() -> Flask:
             if not trow:
                 raise ApiError("FORBIDDEN", "teacher profile not found", 403)
             assigned = db.execute(
-                select(CourseTeacher).where(CourseTeacher.course_id == course_id).where(CourseTeacher.teacher_id == trow.id)
+                select(CourseTeacher).where(CourseTeacher.course_id == course_id).where(CourseTeacher.teacher_id == trow.teacher_id)
             ).scalars().first()
             if not assigned:
                 raise ApiError("FORBIDDEN", "not assigned to this course", 403)
@@ -4651,6 +4663,7 @@ def _create_app() -> Flask:
             a = db.execute(select(Admin).where(Admin.user_id == u.id)).scalar_one_or_none()
             if a:
                 data["admin_id"] = a.admin_id
+        data["pages"] = [p["path"] for p in _role_pages(db, u)]
         return data
 
     def _user_admin_dto(u: User, db: Session) -> Dict[str, Any]:
@@ -4679,6 +4692,7 @@ def _create_app() -> Flask:
             a = db.execute(select(Admin).where(Admin.user_id == u.id)).scalar_one_or_none()
             if a:
                 data["admin_id"] = a.admin_id
+        data["pages"] = [p["path"] for p in _role_pages(db, u)]
         return data
 
     @app.get("/api/admin/users")
@@ -4971,7 +4985,7 @@ def _create_app() -> Flask:
             require_roles(user, {"admin"})
 
             roles = db.execute(select(Role).order_by(Role.id.asc())).scalars().all()
-            permissions = db.execute(select(Permission).order_by(Permission.code.asc())).scalars().all()
+            pages = db.execute(select(Page).order_by(Page.id.asc())).scalars().all()
 
             role_items = []
             for r in roles:
@@ -4979,91 +4993,89 @@ def _create_app() -> Flask:
                     {
                         "id": r.id,
                         "name": r.name,
-                        "permissions": [p.code for p in (r.permissions or [])],
+                        "pages": [p.path for p in (r.pages or [])],
                     }
                 )
-            perm_items = [{"id": p.id, "code": p.code} for p in permissions]
-            return jsonify({"roles": role_items, "permissions": perm_items})
+            page_items = [{"id": p.id, "name": p.name, "path": p.path, "component": p.component} for p in pages]
+            return jsonify({"roles": role_items, "pages": page_items})
 
-    @app.post("/api/admin/permissions")
-    def admin_create_permission():
+    @app.post("/api/admin/pages")
+    def admin_create_page():
         data = _json()
-        code = str(data.get("code", "")).strip()
-        if not code:
-            raise ApiError("BAD_REQUEST", "code required", 400)
-
+        name = str(data.get("name", "")).strip()
+        path = str(data.get("path", "")).strip()
+        component = str(data.get("component", "")).strip() or None
+        if not name or not path:
+            raise ApiError("BAD_REQUEST", "name and path required", 400)
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"admin"})
-
-            existing = db.execute(select(Permission).where(Permission.code == code)).scalar_one_or_none()
+            existing = db.execute(select(Page).where(Page.path == path)).scalar_one_or_none()
             if existing:
-                return jsonify({"permission": {"id": existing.id, "code": existing.code}})
-
-            p = Permission(code=code)
-            db.add(p)
+                return jsonify({"page": {"id": existing.id, "name": existing.name, "path": existing.path, "component": existing.component}})
+            page = Page(name=name, path=path, component=component)
+            db.add(page)
             try:
                 db.commit()
             except IntegrityError:
                 db.rollback()
-                existing2 = db.execute(select(Permission).where(Permission.code == code)).scalar_one_or_none()
-                if existing2:
-                    return jsonify({"permission": {"id": existing2.id, "code": existing2.code}})
-                raise ApiError("CONFLICT", "permission already exists", 409)
-            db.refresh(p)
-            return jsonify({"permission": {"id": p.id, "code": p.code}})
+                existing = db.execute(select(Page).where(Page.path == path)).scalar_one_or_none()
+                if existing:
+                    return jsonify({"page": {"id": existing.id, "name": existing.name, "path": existing.path, "component": existing.component}})
+                raise ApiError("CONFLICT", "page already exists", 409)
+            db.refresh(page)
+            return jsonify({"page": {"id": page.id, "name": page.name, "path": page.path, "component": page.component}})
 
-    @app.put("/api/admin/roles/<int:role_id>/permissions")
-    def admin_set_role_permissions(role_id: int):
+    @app.put("/api/admin/roles/<int:role_id>/pages")
+    def admin_set_role_pages(role_id: int):
         data = _json()
-        codes_raw = data.get("permission_codes")
-        if not isinstance(codes_raw, list):
-            raise ApiError("BAD_REQUEST", "permission_codes must be a list", 400)
-        codes = [str(c).strip() for c in codes_raw if str(c).strip()]
-        codes = list(dict.fromkeys(codes))
+        paths_raw = data.get("visible_pages")
+        if not isinstance(paths_raw, list):
+            raise ApiError("BAD_REQUEST", "visible_pages must be a list", 400)
+        paths = [str(p).strip() for p in paths_raw if str(p).strip()]
+        paths = list(dict.fromkeys(paths))
 
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"admin"})
-
             role = db.get(Role, role_id)
             if not role:
                 raise ApiError("NOT_FOUND", "role not found", 404)
-
-            if not codes:
-                role.permissions = []
+            if not paths:
+                role.pages = []
                 db.commit()
                 db.refresh(role)
-                return jsonify({"role": {"id": role.id, "name": role.name, "permissions": []}})
+                return jsonify({"role": {"id": role.id, "name": role.name, "pages": []}})
 
-            existing = db.execute(select(Permission).where(Permission.code.in_(codes))).scalars().all()
-            by_code = {p.code: p for p in existing}
-            missing = [c for c in codes if c not in by_code]
+            pages = db.execute(select(Page).where(Page.path.in_(paths))).scalars().all()
+            by_path = {p.path: p for p in pages}
+            missing = [p for p in paths if p not in by_path]
             if missing:
-                for c in missing:
-                    db.add(Permission(code=c))
-                try:
-                    db.flush()
-                except IntegrityError:
-                    db.rollback()
-                    pass
-                existing = db.execute(select(Permission).where(Permission.code.in_(codes))).scalars().all()
-                by_code = {p.code: p for p in existing}
-
-            role.permissions = [by_code[c] for c in codes if c in by_code]
+                raise ApiError("BAD_REQUEST", f"unknown pages: {', '.join(missing)}", 400)
+            role.pages = [by_path[p] for p in paths]
             db.commit()
             db.refresh(role)
-            return jsonify({"role": {"id": role.id, "name": role.name, "permissions": [p.code for p in role.permissions]}})
+            return jsonify({"role": {"id": role.id, "name": role.name, "pages": [p.path for p in role.pages]}})
+
+    def _purge_old_system_logs(db: Session, days: int) -> int:
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+        deleted = db.execute(delete(SystemLog).where(SystemLog.created_at < cutoff)).rowcount or 0
+        if deleted:
+            db.commit()
+        return int(deleted)
 
     @app.get("/api/admin/logs")
     def get_logs():
         page = max(1, _parse_int(request.args.get("page")) or 1)
         page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 20))
+        retention_days = max(1, _parse_int(request.args.get("retention_days")) or settings.system_log_retention_days)
         offset = (page - 1) * page_size
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"admin"})
-            stmt = select(SystemLog)
+            _purge_old_system_logs(db, days=retention_days)
+            cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=retention_days)
+            stmt = select(SystemLog).where(SystemLog.created_at >= cutoff)
             total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
             logs = db.execute(stmt.order_by(SystemLog.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
             items = [
@@ -5078,7 +5090,7 @@ def _create_app() -> Flask:
                 }
                 for l in logs
             ]
-            return jsonify({"items": items, "total": total, "page": page, "page_size": page_size})
+            return jsonify({"items": items, "total": total, "page": page, "page_size": page_size, "retention_days": retention_days})
 
     @app.post("/api/admin/backup")
     def backup():
@@ -5117,30 +5129,37 @@ def _seed_rbac(db: Session) -> None:
             db.add(Role(name=role_name))
     db.commit()
 
-    default_permissions = [
-        "admin.users.manage",
-        "admin.rbac.manage",
-        "admin.audit.manage",
-        "admin.logs.view",
-        "graph.sync",
-        "resource.upload",
-        "resource.audit",
-        "resource.view",
-        "resource.favorite",
+    default_pages = [
+        {"name": "资源中心", "path": "/", "component": "ResourceListView"},
+        {"name": "知识图谱", "path": "/graph", "component": "GraphView"},
+        {"name": "个人中心", "path": "/profile", "component": "ProfileView"},
+        {"name": "学习推荐", "path": "/learning", "component": "LearningView"},
+        {"name": "课程管理", "path": "/teacher/courses", "component": "TeacherCoursesView"},
+        {"name": "资源审核", "path": "/admin/audit", "component": "AdminAuditView"},
+        {"name": "课程分配", "path": "/admin/courses", "component": "AdminCoursesView"},
+        {"name": "系统日志", "path": "/admin/logs", "component": "AdminLogsView"},
+        {"name": "账号管理", "path": "/admin/users", "component": "AdminUsersView"},
     ]
-    existing_perms = {p.code for p in db.execute(select(Permission)).scalars().all()}
-    for code in default_permissions:
-        if code not in existing_perms:
-            db.add(Permission(code=code))
+    existing_pages = {p.path for p in db.execute(select(Page)).scalars().all()}
+    for page in default_pages:
+        if page["path"] in existing_pages:
+            continue
+        db.add(Page(**page))
     db.commit()
 
     role_by_name = {r.name: r for r in db.execute(select(Role)).scalars().all()}
-    perm_by_code = {p.code: p for p in db.execute(select(Permission)).scalars().all()}
+    page_by_path = {p.path: p for p in db.execute(select(Page)).scalars().all()}
 
-    admin_role = role_by_name.get("admin")
-    if admin_role:
-        want = [perm_by_code[c] for c in default_permissions if c in perm_by_code]
-        admin_role.permissions = want
+    role_pages = {
+        "student": ["/", "/graph", "/profile", "/learning"],
+        "teacher": ["/", "/graph", "/profile", "/teacher/courses"],
+        "dean": ["/", "/graph", "/profile", "/admin/audit", "/admin/courses", "/admin/users"],
+        "admin": ["/", "/graph", "/profile", "/admin/audit", "/admin/courses", "/admin/logs", "/admin/users"],
+    }
+    for role_name, paths in role_pages.items():
+        role = role_by_name.get(role_name)
+        if role:
+            role.pages = [page_by_path[p] for p in paths if p in page_by_path]
     db.commit()
 
 

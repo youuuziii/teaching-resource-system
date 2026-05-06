@@ -16,7 +16,7 @@ import api from '../api/client'
 
 const loading = ref(false)
 const courses = ref([])
-const pagination = ref({ page: 1, pageSize: 10, total: 0 })
+const pagination = ref({ page: 1, pageSize: 6, total: 0 })
 const teachers = ref([])
 const assignedByCourseId = ref({})
 const keyword = ref('')
@@ -43,7 +43,7 @@ const assignLoading = ref(false)
 const assignCourse = ref(null)
 const assignments = ref([{ teacher_id: null }])
 
-const teacherOptions = computed(() => (teachers.value || []).map((t) => ({ label: `${t.name}${t.has_user ? '' : ' (未绑定账号)'}`, value: t.id })))
+const teacherOptions = computed(() => (teachers.value || []).map((t) => ({ label: `${t.name}${t.has_user ? '' : ' (未绑定账号)'}`, value: t.teacher_id || t.id })))
 
 const filteredMajors = computed(() => {
   if (!tempAssignment.value.department_id) return majors.value
@@ -55,7 +55,7 @@ const selectedMajorsList = computed(() => {
     const m = majors.value.find(x => x.id === mid)
     if (!m) return null
     const d = departments.value.find(x => x.id === m.department_id)
-    return { id: mid, name: m.name, deptName: d ? d.name : '未知学院' }
+    return { id: mid, name: m.name, deptName: d ? d.name : '未知院系' }
   }).filter(x => x !== null)
 })
 
@@ -175,7 +175,7 @@ function openEdit(row) {
     major_ids: selectedMajorIds, 
     description: row.description || '' 
   }
-  tempAssignment.value = { department_id: null, major_ids: [] }
+  tempAssignment.value = { major_ids: [] }
   createOpen.value = true
 }
 
@@ -214,7 +214,7 @@ async function openAssign(row) {
   try {
     const items = await fetchAssigned(row.id)
     if (items && items.length > 0) {
-      assignments.value = items.map(t => ({ teacher_id: t.id }))
+      assignments.value = items.map(t => ({ teacher_id: t.teacher_id || t.id }))
     } else {
       assignments.value = [{ teacher_id: null }]
     }
@@ -242,7 +242,13 @@ async function submitAssign() {
   if (!course?.id) return
   assignLoading.value = true
   try {
-    const validAssignments = assignments.value.filter(a => a.teacher_id)
+    const validAssignments = assignments.value
+      .map((a) => {
+        const tid = a.teacher_id
+        if (tid === null || tid === undefined || tid === '') return null
+        return { teacher_id: tid }
+      })
+      .filter(Boolean)
     await api.put(`/api/courses/${course.id}/teachers`, { assignments: validAssignments })
     ElMessage.success('教学分配保存成功')
     assignOpen.value = false
@@ -333,17 +339,16 @@ onMounted(async () => {
         <el-table-column label="已分配教师" min-width="280">
           <template #default="{ row }">
             <div class="assignment-tags">
-              <el-tooltip 
-                v-for="t in (assignedByCourseId[row.id] || [])" 
-                :key="t.id" 
-                :content="`教师: ${t.name}`" 
-                placement="top"
+              <el-tag
+                v-for="t in (assignedByCourseId[row.id] || [])"
+                :key="t.id"
+                size="small"
+                effect="plain"
+                class="assign-tag"
               >
-                <el-tag size="small" effect="plain" class="assign-tag">
-                  <el-icon><User /></el-icon>
-                  {{ t.name }}
-                </el-tag>
-              </el-tooltip>
+                <el-icon><User /></el-icon>
+                {{ t.name }}
+              </el-tag>
               <span v-if="!((assignedByCourseId[row.id] || []).length)" class="empty-text">未分配教师</span>
             </div>
           </template>
@@ -357,7 +362,7 @@ onMounted(async () => {
           <template #default="{ row }">
             <el-button-group>
               <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
-              <el-button size="small" type="primary" :icon="User" @click="openAssign(row)">分配任务</el-button>
+              <el-button size="small" type="primary" :icon="User" @click="openAssign(row)">分配教师</el-button>
               <el-button size="small" type="danger" :icon="Delete" :loading="deletingId === row.id" @click="removeCourse(row)"></el-button>
             </el-button-group>
           </template>
@@ -368,7 +373,7 @@ onMounted(async () => {
           v-model:current-page="pagination.page"
           v-model:page-size="pagination.pageSize"
           :total="pagination.total"
-          :page-sizes="[10, 20, 50, 100]"
+          :page-sizes="[6, 10, 20, 50, 100]"
           layout="共, sizes, prev, pager, next, jumper"
           background
           @current-change="handlePageChange"
@@ -433,7 +438,7 @@ onMounted(async () => {
     </el-dialog>
 
     <!-- Assign Teachers Dialog -->
-    <el-dialog v-model="assignOpen" title="分配教学任务" width="600px" destroy-on-close>
+    <el-dialog v-model="assignOpen" title="分配教师" width="480px" destroy-on-close>
       <div class="assign-dialog-content">
         <div class="course-header">
           <el-icon><Collection /></el-icon>
@@ -451,7 +456,7 @@ onMounted(async () => {
           </div>
           
           <el-button type="primary" plain style="width: 100%; margin-top: 10px" @click="addAssignment" :icon="Plus">
-            添加任课教师
+            添加教师
           </el-button>
         </el-form>
       </div>

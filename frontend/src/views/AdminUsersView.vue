@@ -8,9 +8,7 @@ import {
   Edit, 
   Delete, 
   User, 
-  Key, 
   Lock,
-  Unlock,
   Setting,
   Upload,
   Download,
@@ -50,21 +48,25 @@ const roleFilterOptions = computed(() => {
 
 const rbacLoading = ref(false)
 const roles = ref([])
-const permissions = ref([])
 const pageOptions = ref([])
-const pageOptionMap = computed(() => new Map((pageOptions.value || []).map((p) => [p.value, p.label])))
-const pageGroups = computed(() => [
-  { title: '基础页面', items: (pageOptions.value || []).filter((p) => ['/', '/graph', '/profile'].includes(p.value)) },
-  { title: '学习与教学', items: (pageOptions.value || []).filter((p) => ['/learning', '/teacher/courses'].includes(p.value)) },
-  { title: '管理后台', items: (pageOptions.value || []).filter((p) => ['/admin/audit', '/admin/courses', '/admin/logs', '/admin/users'].includes(p.value)) },
-])
+
+const PAGE_GROUPS = [
+  { title: '基础页面', paths: ['/', '/graph', '/profile'] },
+  { title: '学习与教学', paths: ['/learning', '/teacher/courses'] },
+  { title: '管理后台', paths: ['/admin/audit', '/admin/courses', '/admin/logs', '/admin/users'] },
+]
+
+const pageLabels = computed(() => new Map((pageOptions.value || []).map((p) => [p.value || p.path, p.label || p.name || p.path])))
+const pageGroups = computed(() => PAGE_GROUPS.map((group) => ({
+  title: group.title,
+  items: (pageOptions.value || []).filter((p) => group.paths.includes(p.value || p.path)),
+})))
 
 const roleOptions = computed(() => (roles.value || []).map((r) => ({ label: r.name, value: r.name })))
 const allowedRoleOptions = computed(() => {
   if (isSystemAdmin.value) return roleOptions.value
   return roleOptions.value.filter((r) => r.value === 'teacher' || r.value === 'student')
 })
-const permissionOptions = computed(() => (permissions.value || []).map((p) => ({ label: p.code, value: p.code })))
 
 async function loadUsers() {
   usersLoading.value = true
@@ -103,8 +105,7 @@ async function loadRbac() {
   try {
     const resp = await api.get('/api/admin/rbac')
     roles.value = resp.data.roles || []
-    permissions.value = resp.data.permissions || []
-    pageOptions.value = resp.data.page_options || []
+    pageOptions.value = resp.data.pages || []
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载RBAC失败')
   } finally {
@@ -262,17 +263,16 @@ async function removeUser(row) {
 }
 
 const roleEditOpen = ref(false)
-const roleEditForm = ref({ id: null, name: '', visible_pages: [], default_visible_pages: [] })
+const roleEditForm = ref({ id: null, name: '', pages: [] })
 const tempRolePages = ref([])
 
 function openRoleEdit(row) {
   roleEditForm.value = {
     id: row.id,
     name: row.name,
-    visible_pages: Array.isArray(row.visible_pages) ? [...row.visible_pages] : [],
-    default_visible_pages: Array.isArray(row.default_visible_pages) ? [...row.default_visible_pages] : [],
+    pages: Array.isArray(row.pages) ? [...row.pages] : [],
   }
-  tempRolePages.value = [...roleEditForm.value.visible_pages]
+  tempRolePages.value = [...roleEditForm.value.pages]
   roleEditOpen.value = true
 }
 
@@ -284,14 +284,20 @@ async function submitRolePerms() {
     ElMessage.success('角色页面配置已更新')
     roleEditOpen.value = false
     await loadRbac()
+
+    if (roleEditForm.value.name === 'admin') {
+      const meResp = await api.get('/api/me')
+      localStorage.setItem('user', JSON.stringify(meResp.data.user))
+      window.dispatchEvent(new Event('user-updated'))
+    }
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '保存失败')
   }
 }
 
 function resetVisiblePagesToDefault() {
-  tempRolePages.value = Array.isArray(roleEditForm.value.default_visible_pages)
-    ? [...roleEditForm.value.default_visible_pages]
+  tempRolePages.value = Array.isArray(roleEditForm.value.pages)
+    ? [...roleEditForm.value.pages]
     : []
 }
 
@@ -299,8 +305,21 @@ onMounted(async () => {
   if (isSystemAdmin.value) {
     await loadRbac()
   } else {
-    roles.value = [{ id: -1, name: 'teacher', permissions: [] }, { id: -2, name: 'student', permissions: [] }]
-    permissions.value = []
+    roles.value = [
+      { id: -1, name: 'teacher', pages: ['/','/graph','/profile','/teacher/courses'] },
+      { id: -2, name: 'student', pages: ['/','/graph','/profile','/learning'] },
+    ]
+    pageOptions.value = [
+      { id: 1, name: '资源中心', path: '/', component: null },
+      { id: 2, name: '知识图谱', path: '/graph', component: null },
+      { id: 3, name: '个人中心', path: '/profile', component: null },
+      { id: 4, name: '学习推荐', path: '/learning', component: null },
+      { id: 5, name: '课程管理', path: '/teacher/courses', component: null },
+      { id: 6, name: '资源审核', path: '/admin/audit', component: null },
+      { id: 7, name: '课程分配', path: '/admin/courses', component: null },
+      { id: 8, name: '系统日志', path: '/admin/logs', component: null },
+      { id: 9, name: '账号管理', path: '/admin/users', component: null },
+    ]
   }
   await loadUsers()
 })
@@ -313,7 +332,7 @@ onMounted(async () => {
         <div class="card-header">
           <div class="title-section">
             <el-icon><Setting /></el-icon>
-            <span>账号与权限中心</span>
+            <span>账号与页面授权中心</span>
           </div>
           <el-button 
             :icon="Refresh" 
@@ -407,7 +426,7 @@ onMounted(async () => {
         </el-tab-pane>
 
         <!-- RBAC Management -->
-        <el-tab-pane v-if="isSystemAdmin" label="角色与权限定义" name="rbac">
+        <el-tab-pane v-if="isSystemAdmin" label="角色权限管理" name="rbac">
           <el-card shadow="never" class="role-pages-card">
             <template #header>
               <div class="card-header">
@@ -418,9 +437,9 @@ onMounted(async () => {
               </div>
             </template>
             <el-alert
-              title="角色页面权限配置"
+              title="角色页面配置"
               type="success"
-              description="只需在这里为每个角色勾选可见页面；其他角色限制已移除。"
+              description="只需在这里为每个角色勾选可见页面；系统将根据页面列表控制菜单和路由。"
               :closable="false"
               show-icon
               style="margin-bottom: 18px"
@@ -437,10 +456,10 @@ onMounted(async () => {
               <el-table-column label="可显示页面" min-width="400">
                 <template #default="{ row }">
                   <div class="perm-tags">
-                    <el-tag v-for="p in row.visible_pages || []" :key="p" size="small" type="success" effect="plain">
-                      {{ pageOptionMap.get(p) || p }}
+                    <el-tag v-for="p in row.pages || []" :key="p" size="small" type="success" effect="plain">
+                      {{ pageLabels.get(p) || p }}
                     </el-tag>
-                    <span v-if="!(row.visible_pages || []).length" class="empty-text">未配置页面</span>
+                    <span v-if="!(row.pages || []).length" class="empty-text">未配置页面</span>
                   </div>
                 </template>
               </el-table-column>
@@ -522,8 +541,9 @@ onMounted(async () => {
             <div v-for="group in pageGroups" :key="group.title" class="page-group-card">
               <div class="page-group-title">{{ group.title }}</div>
               <el-checkbox-group v-model="tempRolePages" class="page-checkbox-group">
-                <el-checkbox v-for="opt in group.items" :key="opt.value" :label="opt.value">
-                  {{ opt.label }} <span class="page-path">({{ opt.value }})</span>
+                <el-checkbox v-for="opt in group.items" :key="opt.path || opt.value" :label="opt.path || opt.value">
+                  {{ opt.name || opt.label || pageLabels.get(opt.path || opt.value) || opt.path || opt.value }}
+                  <span class="page-path">({{ opt.path || opt.value }})</span>
                 </el-checkbox>
               </el-checkbox-group>
             </div>

@@ -31,6 +31,7 @@ const roles = computed(() => {
   }
 })
 const isTeacher = computed(() => roles.value.includes('teacher'))
+const showCourseList = ref(true)
 
 const loadingCourses = ref(false)
 const courses = ref([])
@@ -702,43 +703,51 @@ onMounted(async () => {
 <template>
   <div class="teacher-courses-container">
     <el-row :gutter="24">
-      <el-col :xs="24" :md="6">
-        <el-card class="course-list-card" shadow="never">
+      <Transition name="course-list-fade" mode="out-in">
+        <el-col v-if="showCourseList" :xs="24" :md="6" key="course-list">
+          <el-card class="course-list-card" shadow="never">
           <template #header>
             <div class="card-header">
               <div class="title-with-icon">
                 <el-icon><Collection /></el-icon>
                 <span>我的课程</span>
               </div>
-              <el-button circle :icon="Refresh" size="small" :loading="loadingCourses" @click="fetchCourses" />
+              <div class="header-actions">
+                <el-button circle size="small" class="icon-tool-btn" :icon="Refresh" :loading="loadingCourses" @click="fetchCourses" />
+                <el-button size="small" :icon="FolderOpened" class="hide-course-btn" @click="showCourseList = false">隐藏</el-button>
+              </div>
             </div>
           </template>
 
-          <div v-if="!isTeacher" class="empty-state">
-            <el-icon :size="40" color="#909399"><Warning /></el-icon>
-            <p>需要教师账号权限</p>
-          </div>
-          <div v-else-if="(courses || []).length === 0" class="empty-state">
-            <el-icon :size="40" color="#909399"><Files /></el-icon>
-            <p>暂无分配课程</p>
-          </div>
-          <div v-else class="course-selector">
-            <div
-              v-for="c in courses"
-              :key="c.id"
-              class="course-item"
-              :class="{ 'active': courseId === c.id }"
-              @click="courseId = c.id"
-            >
-              <span class="course-name">{{ c.name }}</span>
-              <el-icon v-if="courseId === c.id"><CircleCheck /></el-icon>
+            <div v-if="!isTeacher" class="empty-state">
+              <el-icon :size="40" color="#909399"><Warning /></el-icon>
+              <p>需要教师账号权限</p>
             </div>
-          </div>
-        </el-card>
-      </el-col>
+            <div v-else-if="(courses || []).length === 0" class="empty-state">
+              <el-icon :size="40" color="#909399"><Files /></el-icon>
+              <p>暂无分配课程</p>
+            </div>
+            <div v-else class="course-selector">
+              <div
+                v-for="c in courses"
+                :key="c.id"
+                class="course-item"
+                :class="{ 'active': courseId === c.id }"
+                @click="courseId = c.id; showCourseList = false"
+              >
+                <span class="course-name">{{ c.name }}</span>
+                <el-icon v-if="courseId === c.id"><CircleCheck /></el-icon>
+              </div>
+            </div>
+          </el-card>
+        </el-col>
+      </Transition>
 
-      <el-col :xs="24" :md="18">
-        <el-tabs type="border-card" class="management-tabs">
+      <el-col :xs="24" :md="showCourseList ? 18 : 24" class="right-panel-col" :class="{ 'blocked-panel': showCourseList }">
+        <div v-if="!showCourseList" class="course-list-toggle">
+          <el-button class="expand-course-btn" type="primary" :icon="FolderOpened" @click="showCourseList = true">展开我的课程</el-button>
+        </div>
+        <el-tabs type="border-card" class="management-tabs" :class="{ 'panel-shadow': showCourseList }">
           <el-tab-pane>
             <template #label>
               <div class="tab-label">
@@ -1289,6 +1298,105 @@ onMounted(async () => {
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 2px 12px 0 rgba(0,0,0,0.05);
+}
+
+.management-tabs.panel-shadow {
+  box-shadow: 0 24px 52px rgba(26, 36, 56, 0.34);
+  filter: saturate(0.9) brightness(0.92);
+}
+
+.right-panel-col.blocked-panel {
+  position: relative;
+}
+
+.right-panel-col.blocked-panel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: rgba(18, 28, 48, 0.16);
+  backdrop-filter: blur(1px);
+  pointer-events: auto;
+}
+
+.right-panel-col.blocked-panel .management-tabs.panel-shadow {
+  position: relative;
+  z-index: 1;
+}
+
+.course-list-toggle {
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon-tool-btn {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  padding: 0;
+}
+
+.hide-course-btn,
+.expand-course-btn {
+  height: 34px;
+  min-height: 34px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #409eff 0%, #2f80ed 100%);
+  border: none;
+  color: #fff;
+  box-shadow: 0 10px 24px rgba(64, 158, 255, 0.32);
+  transition: all 0.24s ease;
+}
+
+.hide-course-btn:hover,
+.hide-course-btn:focus,
+.expand-course-btn:hover,
+.expand-course-btn:focus {
+  background: linear-gradient(135deg, #5aa7ff 0%, #3f8cff 100%);
+  color: #fff;
+  box-shadow: 0 12px 28px rgba(64, 158, 255, 0.42);
+  transform: translateY(-1px);
+}
+
+.hide-course-btn:active,
+.expand-course-btn:active {
+  transform: translateY(1px);
+}
+
+.course-list-card {
+  border-radius: 12px;
+  height: calc(100vh - 120px);
+  overflow: hidden;
+}
+
+.course-list-fade-enter-active {
+  transition: all 0.26s ease-out;
+}
+
+.course-list-fade-leave-active {
+  transition: all 0.16s ease-in;
+}
+
+.course-list-fade-enter-from,
+.course-list-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-10px) scale(0.985);
+}
+
+.course-list-fade-enter-to,
+.course-list-fade-leave-from {
+  opacity: 1;
+  transform: translateX(0) scale(1);
 }
 
 .structure-card {

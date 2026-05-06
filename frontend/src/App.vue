@@ -25,12 +25,21 @@ const user = computed(() => userState.value || {})
 const token = computed(() => tokenState.value || '')
 const isAuthed = computed(() => token.value.length > 0)
 const roles = computed(() => Array.isArray(user.value.roles) ? user.value.roles : [])
+const allowedPages = computed(() => new Set(Array.isArray(user.value.pages) ? user.value.pages : []))
 const elementLocale = zhCn
 
-const isSystemAdmin = computed(() => roles.value.includes('admin'))
-const isDean = computed(() => roles.value.includes('dean'))
-const isStudent = computed(() => roles.value.includes('student'))
-const isTeacherOnly = computed(() => roles.value.includes('teacher') && !roles.value.includes('admin') && !roles.value.includes('dean'))
+const NAV_ITEMS = [
+  { path: '/', label: '资源中心', icon: Collection },
+  { path: '/graph', label: '知识图谱', icon: Share },
+  { path: '/learning', label: '学习推荐', icon: Notebook },
+  { path: '/teacher/courses', label: '课程管理', icon: Memo },
+  { path: '/admin/audit', label: '资源审核', icon: Checked },
+  { path: '/admin/courses', label: '课程分配', icon: Management },
+  { path: '/admin/logs', label: '系统日志', icon: Setting },
+  { path: '/admin/users', label: '账号权限', icon: User },
+]
+
+const visibleNavItems = computed(() => NAV_ITEMS.filter((item) => allowedPages.value.has(item.path)))
 
 function syncAuthState() {
   userState.value = readStoredUser()
@@ -86,41 +95,9 @@ onBeforeUnmount(() => {
             :ellipsis="false"
             @select="go"
           >
-            <el-menu-item index="/">
-              <el-icon><Collection /></el-icon>
-              <span>资源中心</span>
-            </el-menu-item>
-            <el-menu-item index="/graph">
-              <el-icon><Share /></el-icon>
-              <span>知识图谱</span>
-            </el-menu-item>
-            <el-menu-item v-if="isStudent" index="/learning">
-              <el-icon><Notebook /></el-icon>
-              <span>学习推荐</span>
-            </el-menu-item>
-            <el-menu-item v-if="isTeacherOnly" index="/teacher/courses">
-              <el-icon><Memo /></el-icon>
-              <span>课程管理</span>
-            </el-menu-item>
-            <el-menu-item v-if="isDean" index="/admin/audit">
-              <el-icon><Checked /></el-icon>
-              <span>资源审核</span>
-            </el-menu-item>
-            <el-menu-item v-if="isDean || isSystemAdmin" index="/admin/courses">
-              <el-icon><Management /></el-icon>
-              <span>课程分配</span>
-            </el-menu-item>
-            <el-menu-item v-if="isSystemAdmin" index="/admin/logs">
-              <el-icon><Setting /></el-icon>
-              <span>系统日志</span>
-            </el-menu-item>
-            <el-menu-item v-if="isSystemAdmin" index="/admin/users">
-              <el-icon><User /></el-icon>
-              <span>账号权限</span>
-            </el-menu-item>
-            <el-menu-item v-else-if="isDean" index="/admin/users">
-              <el-icon><User /></el-icon>
-              <span>账号管理</span>
+            <el-menu-item v-for="item in visibleNavItems" :key="item.path" :index="item.path">
+              <el-icon><component :is="item.icon" /></el-icon>
+              <span>{{ item.label }}</span>
             </el-menu-item>
           </el-menu>
         </div>
