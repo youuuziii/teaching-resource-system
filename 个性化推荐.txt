@@ -1,60 +1,63 @@
-1. 推荐建议：找什么样的“现成轮子”？
-对于教学资源管理系统，我建议不要去找复杂的深度学习模型（如多塔模型、Transformer），因为那需要海量用户数据。你可以找以下两类开源库：
+“Surprise 库（协同过滤）+ Neo4j（图谱过滤）” 的混合模式
 
-Surprise (Python)：
+第一阶段：环境准备与底层数据准备
+提示 Cursor：
 
-特点：极其著名的 Python 推荐系统库，内置了经典的 SVD、协同过滤（CF）等算法。
+请在后端环境中安装 scikit-surprise 库。
 
-适用场景：如果你的系统有“学生给资源打分”或“收藏次数”数据，用这个库三行代码就能跑出结果。
+在 models.py（或 app.py 的模型部分）中确保有 LearningHistory 表，必须包含字段：user_id, resource_id, action_type（VIEW, STAR, DOWNLOAD）。
 
-LightFM / CaseRecommender：
+编写一个工具函数 get_rating_matrix()，将用户的行为转换为评分：VIEW=1分，STAR=3分，DOWNLOAD=5分。返回一个 Pandas DataFrame。
 
-特点：支持“混合推荐”（结合用户特征和资源内容）。
+第二阶段：实现推荐算法引擎
+提示 Cursor：
+在后端创建一个 recommend_service.py（或在 app.py 中直接添加）：
 
-适用场景：你已经有了大模型提取的知识点（标签），这些库可以很好地处理这些“内容特征”。
+使用 surprise.SVD 算法。
 
-2. 实现个性化推荐的具体步骤
-如果你打算引入 Surprise 库，整个流程可以分为四步。你可以直接把这个逻辑发给 Cursor 帮你写：
+编写 train_model() 函数：读取评分矩阵，训练模型并保存。
 
-第一步：数据准备（从 MySQL/Neo4j 提取数据）
-推荐算法需要 (user_id, item_id, rating) 这种格式。
+编写 get_cf_recommendations(user_id, top_n=10)：利用训练好的模型，预测该用户对未交互资源的评分，返回初步候选清单。
 
-你可以将学生对资源的“点击”记为 1 分，“收藏”记为 3 分，“下载”记为 5 分。
+第三阶段：结合 Neo4j 进行图谱重排序（核心亮点）
+提示 Cursor：
+编写一个函数 refine_with_kg(user_id, candidate_list)：
 
-给 Cursor 的指令：“请在 app.py 中写一个函数，统计 LearningHistory 表，根据操作类型（VIEW/STAR/DOWNLOAD）为每个学生生成一份资源评分列表。”
+连接 Neo4j，查询该用户近期点击过的资源的知识点标签。
 
-第二步：算法训练（引入现成库）
-Python
-from surprise import SVD, Dataset, Reader
+获取这些知识点在图谱中的后继知识点（Next_to）或相似知识点（Related_to）。
 
-# 1. 载入数据
-reader = Reader(rating_scale=(1, 5))
-data = Dataset.load_from_df(df[['user_id', 'item_id', 'rating']], reader)
+检查候选清单中的资源：
 
-# 2. 训练模型（用现成的 SVD 算法，论文里可以大写特写）
-trainset = data.build_full_trainset()
-algo = SVD()
-algo.fit(trainset)
-第三步：结合知识图谱（亮点：混合推荐）
-这是最关键的一步，能让你的论文与众不同：
+如果资源属于“后继知识点”，权重乘以 1.5（进阶推荐）。
 
-逻辑：先用 Surprise 算出一份初步的推荐清单（根据兴趣相似度）。
+如果资源属于“已掌握知识点”，权重乘以 0.5（避免重复）。
 
-过滤：再用你的 Neo4j 检查这份清单。如果某个资源对应的知识点在图谱中属于该学生“已掌握”的，就降低权重；如果是“急需补习”的前置知识点，就提高权重。
+返回最终排序后的前 5 个资源。
 
-论文写法：“本系统采用了一种基于协同过滤与知识图谱路径约束的混合推荐算法。”
+第四阶段：开发 API 接口与触发逻辑
+提示 Cursor：
 
-第四步：前端展示
-在 LearningView.vue 的“推荐”选项卡中，调用这个新接口展示结果。
+在 Flask 中创建接口 GET /api/resources/recommend。
 
-3. 为什么“现成算法 + 知识图谱”是完美组合？
-避短：纯推荐算法在用户少的时候会有“冷启动”问题（算不准）。
+触发逻辑：
 
-扬长：你的知识图谱提供了逻辑关系，可以作为“规则约束”来弥补算法的不足。
+接口应根据当前登录用户的 id 实时计算。
 
-学术价值：在论文中，你可以写：“针对传统协同过滤无法利用学科语义的问题，本文引入了基于语义关联的后验过滤机制。”（这听起来非常专业）。
+增加一个 POST /api/action 接口，每当用户执行收藏或下载时，调用此接口记录行为，并标记“推荐列表需要更新”。
 
-4. 给你的避坑指南
-不要找“黑盒”模型：GitHub 上很多基于 TensorFlow/PyTorch 的推荐模型配置极其复杂，环境能把你折磨疯。坚持用 Surprise 这种简单好用的库。
+确保返回的数据结构与前端 ResourceCard 组件兼容（包含标题、封面、知识点标签等）。
 
-数据量不足怎么办？：如果你的数据库里只有几个测试账号，算法算不出来。这时候你需要写一个 seed_recommend_data 的脚本，伪造几百条点击记录（反正毕设演示，数据逻辑通顺即可）。
+第五阶段：前端界面集成
+提示 Cursor：
+
+修改 LearningView.vue 或 HomeView.vue，增加“智能推荐”模块。
+
+使用 onMounted 钩子调用推荐接口。
+
+实时反馈：监听收藏按钮的点击事件，一旦成功，局部刷新（Reload）推荐列表组件，体现即时推送效果。
+
+💡 给你的技术小贴士（防止 Cursor 翻车）：
+数据冷启动处理：告诉 Cursor：“如果用户是新用户，没有任何行为数据，请直接返回当前全系统下载量最高的 5 个资源作为兜底。”
+
+性能优化：由于 SVD 训练较慢，可以让 Cursor 实现“每隔 1 小时后台训练一次，查询时直接取训练好的模型结果”。

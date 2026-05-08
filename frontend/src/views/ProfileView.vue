@@ -169,6 +169,7 @@ async function markAsRead(notification) {
   try {
     await api.post(`/api/notifications/${notification.id}/read`)
     notification.is_read = true
+    window.dispatchEvent(new Event('notification-updated'))
   } catch (e) {
     ElMessage.error('标记已读失败')
   }
@@ -177,7 +178,10 @@ async function markAsRead(notification) {
 async function markAllAsRead() {
   try {
     await api.post('/api/notifications/read-all')
-    notifications.value.forEach(n => n.is_read = true)
+    notifications.value.forEach((n) => {
+      n.is_read = true
+    })
+    window.dispatchEvent(new Event('notification-updated'))
     ElMessage.success('全部标记为已读')
   } catch (e) {
     ElMessage.error('操作失败')
@@ -191,6 +195,7 @@ async function deleteNotification(id) {
     if (notifications.value.length === 0 && notifPagination.value.page > 1) {
       notifPagination.value.page -= 1
     }
+    window.dispatchEvent(new Event('notification-updated'))
     ElMessage.success('通知已删除')
   } catch (e) {
     ElMessage.error('删除失败')
@@ -213,6 +218,7 @@ async function deleteAllNotifications() {
     notifications.value = []
     notifPagination.value.page = 1
     notifPagination.value.total = 0
+    window.dispatchEvent(new Event('notification-updated'))
     ElMessage.success('通知已全部清空')
   } catch (e) {
     if (e !== 'cancel') {

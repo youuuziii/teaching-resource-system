@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import { useRoute, useRouter } from 'vue-router'
 import { Collection, Share, User, UserFilled, Setting, Checked, Management, Memo, SwitchButton, Notebook } from '@element-plus/icons-vue'
-import api from './api/client'
 import logo from './assets/logo.png'
+import { useNotificationSummary } from './composables/useNotificationSummary'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,10 +27,10 @@ const token = computed(() => tokenState.value || '')
 const isAuthed = computed(() => token.value.length > 0)
 const roles = computed(() => Array.isArray(user.value.roles) ? user.value.roles : [])
 const allowedPages = computed(() => new Set(Array.isArray(user.value.pages) ? user.value.pages : []))
+const authIdentity = computed(() => user.value?.id || user.value?.username || token.value)
 const elementLocale = zhCn
-const notificationCount = ref(0)
-const hasPendingResourceReview = ref(false)
-const notificationTimer = ref(null)
+const { notificationCount, hasPendingResourceReview, resetNotificationState, stopNotificationPolling } =
+  useNotificationSummary(authIdentity, isAuthed)
 
 const NAV_ITEMS = [
   { path: '/', label: '资源中心', icon: Collection },
@@ -54,40 +54,6 @@ function handleUserUpdated() {
   syncAuthState()
 }
 
-function isResourceReviewNotification(item) {
-  return item?.type === 'audit_pending' || /资源待审核|批量资源待审核/.test(`${item?.title || ''}${item?.content || ''}`)
-}
-
-async function fetchNotificationSummary() {
-  if (!isAuthed.value) {
-    notificationCount.value = 0
-    hasPendingResourceReview.value = false
-    return
-  }
-  try {
-    const resp = await api.get('/api/notifications', { params: { page: 1, page_size: 100 } })
-    const items = resp.data.items || []
-    notificationCount.value = items.filter(n => !n.is_read).length
-    hasPendingResourceReview.value = items.some(n => !n.is_read && isResourceReviewNotification(n))
-  } catch {
-    notificationCount.value = 0
-    hasPendingResourceReview.value = false
-  }
-}
-
-function startNotificationPolling() {
-  stopNotificationPolling()
-  fetchNotificationSummary()
-  notificationTimer.value = window.setInterval(fetchNotificationSummary, 30000)
-}
-
-function stopNotificationPolling() {
-  if (notificationTimer.value) {
-    window.clearInterval(notificationTimer.value)
-    notificationTimer.value = null
-  }
-}
-
 function go(path) {
   router.push(path)
 }
@@ -97,6 +63,7 @@ function logout() {
   localStorage.removeItem('user')
   syncAuthState()
   stopNotificationPolling()
+  resetNotificationState()
   window.dispatchEvent(new Event('user-updated'))
   router.push('/login')
 }
@@ -105,7 +72,6 @@ onMounted(() => {
   window.addEventListener('user-updated', handleUserUpdated)
   window.addEventListener('storage', handleUserUpdated)
   syncAuthState()
-  startNotificationPolling()
 })
 
 onBeforeUnmount(() => {
