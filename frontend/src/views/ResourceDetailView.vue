@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
   Download, 
   Star, 
@@ -14,7 +14,8 @@ import {
   Document,
   Check,
   Close,
-  Timer
+  Timer,
+  Delete
 } from '@element-plus/icons-vue'
 import api from '../api/client'
 
@@ -27,16 +28,26 @@ const resource = ref(null)
 const createdByUser = ref(null)
 const auditedByUser = ref(null)
 
-const isAuthed = computed(() => (localStorage.getItem('token') || '').length > 0)
-const roles = computed(() => {
+const storedUser = computed(() => {
   try {
-    const u = JSON.parse(localStorage.getItem('user') || 'null')
-    return Array.isArray(u?.roles) ? u.roles : []
+    return JSON.parse(localStorage.getItem('user') || 'null') || null
   } catch {
-    return []
+    return null
   }
 })
+const isAuthed = computed(() => (localStorage.getItem('token') || '').length > 0)
+const roles = computed(() => {
+  const u = storedUser.value
+  return Array.isArray(u?.roles) ? u.roles : []
+})
+const currentUserId = computed(() => storedUser.value?.id ?? null)
+const isCreator = computed(() => currentUserId.value != null && resource.value?.created_by === currentUserId.value)
 const canFavorite = computed(() => isAuthed.value && roles.value.includes('student'))
+const canDeleteResource = computed(() => {
+  if (!isAuthed.value) return false
+  if (roles.value.includes('admin') || roles.value.includes('dean')) return true
+  return roles.value.includes('teacher') && !!resource.value?.course_id
+})
 
 async function fetchDetail() {
   loading.value = true
@@ -76,6 +87,35 @@ async function toggleFavorite() {
   }
 }
 
+async function deleteResource() {
+  if (!resource.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确定要申请删除该资源吗？提交后需要教务管理员审核，审核通过后才会真正删除，并同步从图谱中移除对应实体节点。',
+      '申请删除',
+      {
+        confirmButtonText: '提交申请',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+
+    const resp = await api.delete(`/api/resources/${resource.value.id}`)
+    if (resp?.data?.mode === 'requested') {
+      ElMessage.success('删除申请提交成功，等待管理员审核')
+      router.replace('/teacher/courses')
+      return
+    }
+    window.dispatchEvent(new Event('graph-updated'))
+    ElMessage.success('资源已删除')
+    router.replace('/teacher/courses')
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      ElMessage.error(e?.response?.data?.error?.message || '删除失败')
+    }
+  }
+}
+
 const statusType = computed(() => {
   if (!resource.value) return 'info'
   switch (resource.value.status) {
@@ -105,6 +145,15 @@ onMounted(fetchDetail)
     <div class="detail-actions">
       <el-button :icon="ArrowLeft" @click="goBack">返回列表</el-button>
       <div class="right-actions">
+        <el-button 
+          v-if="resource && canDeleteResource" 
+          type="danger" 
+          plain 
+          :icon="Delete" 
+          @click="deleteResource"
+        >
+          删除资源
+        </el-button>
         <el-button 
           v-if="resource && canFavorite" 
           :type="resource.is_favorited ? 'warning' : 'default'"

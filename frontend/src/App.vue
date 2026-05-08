@@ -29,8 +29,8 @@ const roles = computed(() => Array.isArray(user.value.roles) ? user.value.roles 
 const allowedPages = computed(() => new Set(Array.isArray(user.value.pages) ? user.value.pages : []))
 const authIdentity = computed(() => user.value?.id || user.value?.username || token.value)
 const elementLocale = zhCn
-const { notificationCount, hasPendingResourceReview, resetNotificationState, stopNotificationPolling } =
-  useNotificationSummary(authIdentity, isAuthed)
+const { notificationCount, hasPendingResourceReview, hasPendingDeleteRequest, resetNotificationState, stopNotificationPolling } =
+  useNotificationSummary(authIdentity, isAuthed, roles)
 
 const NAV_ITEMS = [
   { path: '/', label: '资源中心', icon: Collection },
@@ -106,7 +106,7 @@ onBeforeUnmount(() => {
               <el-icon><component :is="item.icon" /></el-icon>
               <span class="nav-label-with-badge">
                 <span>{{ item.label }}</span>
-                <span v-if="item.path === '/audit' && hasPendingResourceReview" class="nav-dot" aria-hidden="true"></span>
+                <span v-if="item.path === '/audit' && (hasPendingResourceReview || hasPendingDeleteRequest)" class="nav-dot" aria-hidden="true"></span>
               </span>
             </el-menu-item>
           </el-menu>

@@ -3284,6 +3284,70 @@ def _create_app() -> Flask:
             db.commit()
             return jsonify({"ok": True})
 
+    @app.delete("/api/notifications/<int:notification_id>")
+    def delete_notification(notification_id: int):
+        with SessionLocal() as db:
+            user = require_auth(db)
+            n = db.get(Notification, notification_id)
+            if not n or n.user_id != user.id:
+                raise ApiError("NOT_FOUND", "notification not found", 404)
+            db.delete(n)
+            db.commit()
+            return jsonify({"ok": True})
+
+    @app.get("/api/admin/delete-requests")
+    def list_delete_requests():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"admin", "dean"})
+            stmt = select(Notification).where(Notification.type == "delete_request").order_by(Notification.created_at.desc())
+            items = db.execute(stmt).scalars().all()
+            payload = []
+            for n in items:
+                res = db.get(Resource, n.related_id) if n.related_id else None
+                payload.append({
+                    "notification_id": n.id,
+                    "resource_id": n.related_id,
+                    "title": n.title,
+                    "content": n.content,
+                    "is_read": n.is_read,
+                    "created_at": n.created_at.isoformat(),
+                    "resource_title": res.title if res else None,
+                    "resource_status": res.status if res else None,
+                    "resource_course": res.course.name if res and res.course else res.course_name if res else None,
+                })
+            return jsonify({"items": payload})
+
+    @app.post("/api/admin/delete-requests/<int:notification_id>/approve")
+    def approve_delete_request(notification_id: int):
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"admin", "dean"})
+            n = db.get(Notification, notification_id)
+            if not n or n.type != "delete_request" or not n.related_id:
+                raise ApiError("NOT_FOUND", "delete request not found", 404)
+            res = db.get(Resource, n.related_id)
+            if not res:
+                db.delete(n)
+                db.commit()
+                return jsonify({"ok": True, "mode": "already_gone"})
+            result = _delete_resource_with_relations(db, res)
+            db.delete(n)
+            db.commit()
+            return jsonify({"ok": True, "mode": "deleted", "result": result})
+
+    @app.post("/api/admin/delete-requests/<int:notification_id>/reject")
+    def reject_delete_request(notification_id: int):
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"admin", "dean"})
+            n = db.get(Notification, notification_id)
+            if not n or n.type != "delete_request":
+                raise ApiError("NOT_FOUND", "delete request not found", 404)
+            db.delete(n)
+            db.commit()
+            return jsonify({"ok": True, "mode": "rejected"})
+
     @app.put("/api/me")
     def update_me():
         data = _json()
@@ -4055,15 +4119,50 @@ def _create_app() -> Flask:
     def delete_resource(resource_id: int):
         with SessionLocal() as db:
             user = require_auth(db)
-            require_roles(user, {"teacher"})
+            require_roles(user, {"teacher", "admin", "dean"})
             res = db.get(Resource, resource_id)
             if not res:
                 raise ApiError("NOT_FOUND", "resource not found", 404)
-            if res.created_by != user.id:
-                raise ApiError("FORBIDDEN", "cannot delete others' resources", 403)
-            result = _delete_resource_with_relations(db, res)
+
+            user_roles = {r.name for r in user.roles}
+            if "admin" in user_roles or "dean" in user_roles:
+                result = _delete_resource_with_relations(db, res)
+                db.commit()
+                return jsonify({"ok": True, "result": result, "mode": "deleted"})
+
+            teacher_row = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
+            if not teacher_row:
+                teacher_row = db.execute(select(Teacher).where(Teacher.name == user.username)).scalar_one_or_none()
+            if not teacher_row:
+                raise ApiError("FORBIDDEN", "teacher profile not found", 403)
+
+            if res.course_id is None:
+                raise ApiError("FORBIDDEN", "resource has no course", 403)
+
+            course_teacher_ok = db.execute(
+                select(CourseTeacher.id)
+                .where(CourseTeacher.course_id == res.course_id)
+                .where(CourseTeacher.teacher_id == teacher_row.teacher_id)
+            ).scalar_one_or_none() is not None
+            if not course_teacher_ok:
+                raise ApiError("FORBIDDEN", "only teachers assigned to this course can request deletion", 403)
+
+            deans = db.execute(select(User).join(User.roles).where(Role.name == "dean")).scalars().all()
+            teacher_name = teacher_row.name or user.username
+            notice_title = "删除资源申请"
+            notice_content = f"教师 {teacher_name} 申请删除资源《{res.title}》, 请审核处理。"
+            recipients = {user.id, *[dean.id for dean in deans]}
+            for recipient_id in recipients:
+                db.add(Notification(
+                    user_id=recipient_id,
+                    title=notice_title,
+                    content=notice_content,
+                    type="delete_request",
+                    related_id=res.id,
+                ))
+
             db.commit()
-            return jsonify({"ok": True, "result": result})
+            return jsonify({"ok": True, "mode": "requested"})
 
     @app.post("/api/resources/batch-delete")
     def batch_delete_resources():

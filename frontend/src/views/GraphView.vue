@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts'
@@ -37,6 +37,10 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+function handleGraphUpdated() {
+  load()
 }
 
 function mergeGraph(partial) {
@@ -169,9 +173,18 @@ function render() {
   }, true)
 }
 
+const handleResize = () => chart?.resize()
+
 onMounted(() => {
   load()
-  window.addEventListener('resize', () => chart?.resize())
+  window.addEventListener('resize', handleResize)
+  window.addEventListener('graph-updated', handleGraphUpdated)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+  window.removeEventListener('graph-updated', handleGraphUpdated)
+  chart?.dispose?.()
 })
 
 watch(course, () => load())
