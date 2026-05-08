@@ -632,7 +632,7 @@ def _create_app() -> Flask:
         except Exception:
             return
 
-    def _neo4j_upsert_chapter(ch: Chapter) -> None:
+    def _neo4j_upsert_chapter(ch: Chapter, course_name: Optional[str] = None) -> None:
         if not neo4j_driver:
             return
         try:
@@ -645,19 +645,20 @@ def _create_app() -> Flask:
                     """,
                     {"id": ch.id, "name": ch.name},
                 )
-                if ch.course:
+                cname = course_name or (ch.course.name if ch.course else None)
+                if cname:
                     session.run(
                         """
                         MERGE (c:Course {name: $cname})
                         MERGE (ch:Chapter {id: $id})
                         MERGE (c)-[:HAS_CHAPTER]->(ch)
                         """,
-                        {"cname": ch.course.name, "id": ch.id},
+                        {"cname": cname, "id": ch.id},
                     )
         except Exception:
             pass
 
-    def _neo4j_upsert_section(s: Section) -> None:
+    def _neo4j_upsert_section(s: Section, chapter_id: Optional[int] = None) -> None:
         if not neo4j_driver:
             return
         try:
@@ -670,14 +671,15 @@ def _create_app() -> Flask:
                     """,
                     {"id": s.id, "name": s.name},
                 )
-                if s.chapter:
+                cid = chapter_id or s.chapter_id
+                if cid:
                     session.run(
                         """
                         MERGE (ch:Chapter {id: $chid})
                         MERGE (s:Section {id: $id})
                         MERGE (ch)-[:HAS_SECTION]->(s)
                         """,
-                        {"chid": s.chapter_id, "id": s.id},
+                        {"chid": cid, "id": s.id},
                     )
         except Exception:
             pass
@@ -2325,6 +2327,7 @@ def _create_app() -> Flask:
     def list_courses():
         q = (request.args.get("q") or "").strip()
         major_id = _parse_int(request.args.get("major_id"))
+        department_id = _parse_int(request.args.get("department_id"))
         page = max(1, _parse_int(request.args.get("page")) or 1)
         page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 20))
         offset = (page - 1) * page_size
@@ -2336,6 +2339,8 @@ def _create_app() -> Flask:
                 like = f"%{q}%"
                 stmt = stmt.where((Course.name.like(like)) | (Course.code.like(like)) | (Course.description.like(like)))
             
+            if department_id:
+                stmt = stmt.join(Course.course_majors).join(CourseMajor.major).where(Major.department_id == department_id)
             if major_id:
                 stmt = stmt.join(CourseMajor).where(CourseMajor.major_id == major_id)
 
@@ -3547,7 +3552,7 @@ def _create_app() -> Flask:
             ).scalars().all()
             for dean in deans:
                 db.add(Notification(
-                    user_id=dean.user_id,
+                    user_id=dean.id,
                     title="待审核资源",
                     content=f"教师 {user.username} 上传了新资源《{res.title}》，请及时审核。",
                     type="audit_pending",
@@ -3704,7 +3709,7 @@ def _create_app() -> Flask:
                 deans = db.execute(select(User).join(User.roles).where(Role.name == "dean")).scalars().all()
                 for dean in deans:
                     db.add(Notification(
-                        user_id=dean.user_id,
+                        user_id=dean.id,
                         title="批量资源待审核",
                         content=f"教师 {user.username} 批量上传了 {len(files)} 份资源，请及时审核。",
                         type="audit_pending"
@@ -3931,6 +3936,7 @@ def _create_app() -> Flask:
                 status = "approved"
             current = get_current_user(db)
             user: Optional[User] = None
+            user_roles: set[str] = set()
             if status in {"pending", "rejected"}:
                 user = require_auth(db)
                 user_roles = {r.name for r in user.roles}
@@ -3941,30 +3947,51 @@ def _create_app() -> Flask:
                     if not user_roles.intersection({"dean", "admin", "teacher"}):
                         raise ApiError("FORBIDDEN", "Insufficient role", 403)
 
-            q = select(Resource).where(Resource.status == status)
-            if user and status in {"pending", "rejected"}:
-                user_roles = {r.name for r in user.roles}
-                if "teacher" in user_roles and "dean" not in user_roles and "admin" not in user_roles:
-                    q = q.where(Resource.created_by == user.id)
-            if status == "approved" and current:
-                pass
-            if keyword:
-                like = f"%{keyword}%"
-                q = q.where((Resource.title.like(like)) | (Resource.description.like(like)))
-            if course_id is not None:
-                q = q.where(Resource.course_id == course_id)
-            if knowledge_point_id is not None:
-                q = q.where(Resource.knowledge_point_id == knowledge_point_id)
-            if teacher_id is not None:
-                q = q.join(ResourceTeacher, ResourceTeacher.resource_id == Resource.id).where(
-                    ResourceTeacher.teacher_id == teacher_id
-                )
-            if tag:
-                q = q.join(ResourceTag, ResourceTag.resource_id == Resource.id).where(ResourceTag.tag == tag)
+            def _build_query(resource_status: str):
+                q = select(Resource).where(Resource.status == resource_status)
+                if user_roles and resource_status in {"pending", "rejected"}:
+                    if "teacher" in user_roles and "dean" not in user_roles and "admin" not in user_roles:
+                        q = q.where(Resource.created_by == user.id)
+                if keyword:
+                    like = f"%{keyword}%"
+                    q = q.where((Resource.title.like(like)) | (Resource.description.like(like)))
+                if course_id is not None:
+                    q = q.where(Resource.course_id == course_id)
+                if knowledge_point_id is not None:
+                    q = q.where(Resource.knowledge_point_id == knowledge_point_id)
+                if teacher_id is not None:
+                    q = q.join(ResourceTeacher, ResourceTeacher.resource_id == Resource.id).where(
+                        ResourceTeacher.teacher_id == teacher_id
+                    )
+                if tag:
+                    q = q.join(ResourceTag, ResourceTag.resource_id == Resource.id).where(ResourceTag.tag == tag)
+                return q
 
+            q = _build_query(status)
             total = db.execute(select(func.count()).select_from(q.subquery())).scalar_one() or 0
             resources = db.execute(q.order_by(Resource.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
-            return jsonify({"items": [_resource_dto(r) for r in resources], "total": total, "page": page, "page_size": page_size})
+
+            status_counts = None
+            if current:
+                current_roles = {r.name for r in current.roles}
+                can_view_pending = bool(current_roles.intersection({"dean", "teacher"}))
+                can_view_rejected = bool(current_roles.intersection({"dean", "admin", "teacher"}))
+                count_specs = {
+                    "pending": can_view_pending,
+                    "rejected": can_view_rejected,
+                    "approved": True,
+                }
+                status_counts = {}
+                for resource_status, allowed in count_specs.items():
+                    if not allowed:
+                        continue
+                    cq = _build_query(resource_status)
+                    status_counts[resource_status] = db.execute(select(func.count()).select_from(cq.subquery())).scalar_one() or 0
+
+            payload = {"items": [_resource_dto(r) for r in resources], "total": total, "page": page, "page_size": page_size}
+            if status_counts is not None:
+                payload["status_counts"] = status_counts
+            return jsonify(payload)
 
     @app.get("/api/resources/<int:resource_id>")
     def get_resource(resource_id: int):
@@ -5135,14 +5162,32 @@ def _seed_rbac(db: Session) -> None:
         {"name": "个人中心", "path": "/profile", "component": "ProfileView"},
         {"name": "学习推荐", "path": "/learning", "component": "LearningView"},
         {"name": "课程管理", "path": "/teacher/courses", "component": "TeacherCoursesView"},
-        {"name": "资源审核", "path": "/admin/audit", "component": "AdminAuditView"},
-        {"name": "课程分配", "path": "/admin/courses", "component": "AdminCoursesView"},
+        {"name": "资源审核", "path": "/audit", "component": "AuditView"},
+        {"name": "课程分配", "path": "/courses", "component": "CoursesView"},
         {"name": "系统日志", "path": "/admin/logs", "component": "AdminLogsView"},
         {"name": "账号管理", "path": "/admin/users", "component": "AdminUsersView"},
     ]
-    existing_pages = {p.path for p in db.execute(select(Page)).scalars().all()}
+    existing_pages = db.execute(select(Page)).scalars().all()
+    page_by_path = {p.path: p for p in existing_pages}
+    page_by_name = {p.name: p for p in existing_pages}
+    legacy_page_aliases = {
+        "/admin/audit": {"name": "资源审核", "path": "/audit", "component": "AuditView"},
+        "/admin/courses": {"name": "课程分配", "path": "/courses", "component": "CoursesView"},
+    }
+    for old_path, new_page in legacy_page_aliases.items():
+        legacy_page = page_by_path.get(old_path) or page_by_name.get(new_page["name"])
+        if legacy_page:
+            legacy_page.path = new_page["path"]
+            legacy_page.component = new_page["component"]
+            legacy_page.name = new_page["name"]
+            page_by_path[new_page["path"]] = legacy_page
+            page_by_name[new_page["name"]] = legacy_page
     for page in default_pages:
-        if page["path"] in existing_pages:
+        existing = page_by_path.get(page["path"]) or page_by_name.get(page["name"])
+        if existing:
+            existing.path = page["path"]
+            existing.component = page["component"]
+            existing.name = page["name"]
             continue
         db.add(Page(**page))
     db.commit()
@@ -5150,15 +5195,15 @@ def _seed_rbac(db: Session) -> None:
     role_by_name = {r.name: r for r in db.execute(select(Role)).scalars().all()}
     page_by_path = {p.path: p for p in db.execute(select(Page)).scalars().all()}
 
-    role_pages = {
+    default_role_pages = {
         "student": ["/", "/graph", "/profile", "/learning"],
         "teacher": ["/", "/graph", "/profile", "/teacher/courses"],
-        "dean": ["/", "/graph", "/profile", "/admin/audit", "/admin/courses", "/admin/users"],
-        "admin": ["/", "/graph", "/profile", "/admin/audit", "/admin/courses", "/admin/logs", "/admin/users"],
+        "dean": ["/", "/graph", "/profile", "/audit", "/courses", "/admin/users"],
+        "admin": ["/", "/graph", "/profile", "/audit", "/courses", "/admin/logs", "/admin/users"],
     }
-    for role_name, paths in role_pages.items():
+    for role_name, paths in default_role_pages.items():
         role = role_by_name.get(role_name)
-        if role:
+        if role and not role.pages:
             role.pages = [page_by_path[p] for p in paths if p in page_by_path]
     db.commit()
 
@@ -5235,7 +5280,7 @@ def _resource_dto(r: Resource) -> Dict[str, Any]:
     teachers = []
     for rt in getattr(r, "resource_teachers", []) or []:
         if rt.teacher:
-            teachers.append({"id": rt.teacher.id, "name": rt.teacher.name})
+            teachers.append({"id": rt.teacher.teacher_id, "name": rt.teacher.name})
     return {
         "id": r.id,
         "title": r.title,

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import { useRoute, useRouter } from 'vue-router'
 import { Collection, Share, User, UserFilled, Setting, Checked, Management, Memo, SwitchButton, Notebook } from '@element-plus/icons-vue'
+import api from './api/client'
 import logo from './assets/logo.png'
 
 const route = useRoute()
@@ -27,14 +28,17 @@ const isAuthed = computed(() => token.value.length > 0)
 const roles = computed(() => Array.isArray(user.value.roles) ? user.value.roles : [])
 const allowedPages = computed(() => new Set(Array.isArray(user.value.pages) ? user.value.pages : []))
 const elementLocale = zhCn
+const notificationCount = ref(0)
+const hasPendingResourceReview = ref(false)
+const notificationTimer = ref(null)
 
 const NAV_ITEMS = [
   { path: '/', label: '资源中心', icon: Collection },
   { path: '/graph', label: '知识图谱', icon: Share },
   { path: '/learning', label: '学习推荐', icon: Notebook },
   { path: '/teacher/courses', label: '课程管理', icon: Memo },
-  { path: '/admin/audit', label: '资源审核', icon: Checked },
-  { path: '/admin/courses', label: '课程分配', icon: Management },
+  { path: '/audit', label: '资源审核', icon: Checked },
+  { path: '/courses', label: '课程分配', icon: Management },
   { path: '/admin/logs', label: '系统日志', icon: Setting },
   { path: '/admin/users', label: '账号权限', icon: User },
 ]
@@ -50,6 +54,40 @@ function handleUserUpdated() {
   syncAuthState()
 }
 
+function isResourceReviewNotification(item) {
+  return item?.type === 'audit_pending' || /资源待审核|批量资源待审核/.test(`${item?.title || ''}${item?.content || ''}`)
+}
+
+async function fetchNotificationSummary() {
+  if (!isAuthed.value) {
+    notificationCount.value = 0
+    hasPendingResourceReview.value = false
+    return
+  }
+  try {
+    const resp = await api.get('/api/notifications', { params: { page: 1, page_size: 100 } })
+    const items = resp.data.items || []
+    notificationCount.value = items.filter(n => !n.is_read).length
+    hasPendingResourceReview.value = items.some(n => !n.is_read && isResourceReviewNotification(n))
+  } catch {
+    notificationCount.value = 0
+    hasPendingResourceReview.value = false
+  }
+}
+
+function startNotificationPolling() {
+  stopNotificationPolling()
+  fetchNotificationSummary()
+  notificationTimer.value = window.setInterval(fetchNotificationSummary, 30000)
+}
+
+function stopNotificationPolling() {
+  if (notificationTimer.value) {
+    window.clearInterval(notificationTimer.value)
+    notificationTimer.value = null
+  }
+}
+
 function go(path) {
   router.push(path)
 }
@@ -58,6 +96,7 @@ function logout() {
   localStorage.removeItem('token')
   localStorage.removeItem('user')
   syncAuthState()
+  stopNotificationPolling()
   window.dispatchEvent(new Event('user-updated'))
   router.push('/login')
 }
@@ -66,11 +105,13 @@ onMounted(() => {
   window.addEventListener('user-updated', handleUserUpdated)
   window.addEventListener('storage', handleUserUpdated)
   syncAuthState()
+  startNotificationPolling()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('user-updated', handleUserUpdated)
   window.removeEventListener('storage', handleUserUpdated)
+  stopNotificationPolling()
 })
 </script>
 
@@ -97,7 +138,10 @@ onBeforeUnmount(() => {
           >
             <el-menu-item v-for="item in visibleNavItems" :key="item.path" :index="item.path">
               <el-icon><component :is="item.icon" /></el-icon>
-              <span>{{ item.label }}</span>
+              <span class="nav-label-with-badge">
+                <span>{{ item.label }}</span>
+                <span v-if="item.path === '/audit' && hasPendingResourceReview" class="nav-dot" aria-hidden="true"></span>
+              </span>
             </el-menu-item>
           </el-menu>
         </div>
@@ -105,7 +149,9 @@ onBeforeUnmount(() => {
         <div class="aside-footer">
           <template v-if="isAuthed">
             <div class="user-card" @click="go('/profile')">
-              <el-avatar :size="38" :icon="UserFilled" />
+              <el-badge :value="notificationCount" :hidden="notificationCount === 0" :max="99" class="avatar-badge">
+                <el-avatar :size="38" :icon="UserFilled" />
+              </el-badge>
               <div class="user-meta">
                 <div class="username">{{ user.username || '用户' }}</div>
                 <div class="role-text">{{ roles.join(' / ') || '未分配角色' }}</div>
@@ -272,6 +318,21 @@ body {
   background: var(--app-sidebar-active-bg) !important;
 }
 
+.nav-label-with-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #f56c6c;
+  box-shadow: 0 0 0 3px rgba(245, 108, 108, 0.16);
+  flex: 0 0 auto;
+}
+
 .aside-footer {
   padding: 14px 14px 18px;
   border-top: 1px solid rgba(29, 43, 77, 0.08);
@@ -302,6 +363,23 @@ body {
 .user-meta .username {
   font-weight: 700;
   color: var(--app-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.avatar-badge :deep(.el-badge__content) {
+  border: none;
+  box-shadow: 0 0 0 2px #fff;
+}
+
+.resource-review-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f56c6c;
+  box-shadow: 0 0 0 3px rgba(245, 108, 108, 0.18);
+  display: inline-block;
 }
 
 .role-text {

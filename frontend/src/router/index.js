@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import AdminAuditView from '../views/AdminAuditView.vue'
-import AdminCoursesView from '../views/AdminCoursesView.vue'
+import AuditView from '../views/AuditView.vue'
+import CoursesView from '../views/CoursesView.vue'
 import AdminLogsView from '../views/AdminLogsView.vue'
 import AdminUsersView from '../views/AdminUsersView.vue'
 import GraphView from '../views/GraphView.vue'
@@ -22,8 +22,8 @@ const router = createRouter({
     { path: '/profile', component: ProfileView },
     { path: '/learning', component: LearningView },
     { path: '/login', component: LoginView },
-    { path: '/admin/audit', component: AdminAuditView },
-    { path: '/admin/courses', component: AdminCoursesView },
+    { path: '/audit', component: AuditView },
+    { path: '/courses', component: CoursesView },
     { path: '/admin/logs', component: AdminLogsView },
     { path: '/admin/users', component: AdminUsersView },
     { path: '/teacher/courses', component: TeacherCoursesView },
@@ -42,6 +42,8 @@ function getAllowedPages() {
 
 function normalizePath(path) {
   if (path === '/resources' || path.startsWith('/resources/')) return '/resources/:id'
+  if (path === '/admin/audit') return '/audit'
+  if (path === '/admin/courses') return '/courses'
   return path
 }
 

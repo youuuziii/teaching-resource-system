@@ -7,7 +7,8 @@ const loading = ref(false)
 const items = ref([])
 const selectedRows = ref([])
 const deleting = ref(false)
-const approvingAll = ref(false)
+const approvingSelected = ref(false)
+const statusCounts = ref({ pending: 0, rejected: 0, approved: 0 })
 const pagination = ref({ page: 1, pageSize: 10, total: 0 })
 
 const state = reactive({
@@ -34,22 +35,35 @@ const isSystemAdmin = computed(() => roles.value.includes('admin'))
 const isDean = computed(() => roles.value.includes('dean'))
 const canAudit = computed(() => isDean.value)
 const canBatchDelete = computed(() => isDean.value || isSystemAdmin.value)
-const pendingCount = computed(() => items.value.filter((i) => i.status === 'pending').length)
-const rejectedCount = computed(() => items.value.filter((i) => i.status === 'rejected').length)
-const approvedCount = computed(() => items.value.filter((i) => i.status === 'approved').length)
+const pendingCount = computed(() => statusCounts.value.pending)
+const rejectedCount = computed(() => statusCounts.value.rejected)
+const approvedCount = computed(() => statusCounts.value.approved)
 
-const statusTagType = (status) => {
-  if (status === 'approved') return 'success'
-  if (status === 'pending') return 'warning'
-  if (status === 'rejected') return 'danger'
-  return 'info'
+const STATUS_META = {
+  pending: { label: '待审核', type: 'warning' },
+  rejected: { label: '已拒绝', type: 'danger' },
+  approved: { label: '已通过', type: 'success' },
 }
 
-const statusText = (status) => {
-  if (status === 'approved') return '已通过'
-  if (status === 'pending') return '待审核'
-  if (status === 'rejected') return '已拒绝'
-  return status || '-'
+const statusTabs = computed(() => [
+  { key: 'pending', count: pendingCount.value, ...STATUS_META.pending },
+  { key: 'rejected', count: rejectedCount.value, ...STATUS_META.rejected },
+  { key: 'approved', count: approvedCount.value, ...STATUS_META.approved },
+])
+
+function statusTagType(status) {
+  return STATUS_META[status]?.type || 'info'
+}
+
+function statusText(status) {
+  return STATUS_META[status]?.label || status || '-'
+}
+
+function switchStatus(status) {
+  if (state.status === status) return
+  state.status = status
+  pagination.value.page = 1
+  fetchList()
 }
 
 if (isSystemAdmin.value && state.status === 'pending') state.status = 'rejected'
@@ -62,6 +76,11 @@ async function fetchList() {
     })
     items.value = resp.data.items || []
     pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
+    statusCounts.value = {
+      pending: resp.data.status_counts?.pending ?? statusCounts.value.pending,
+      rejected: resp.data.status_counts?.rejected ?? statusCounts.value.rejected,
+      approved: resp.data.status_counts?.approved ?? statusCounts.value.approved,
+    }
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载失败')
   } finally {
@@ -70,18 +89,21 @@ async function fetchList() {
 }
 
 function handlePageChange(page) {
+  if (pagination.value.page === page) return
   pagination.value.page = page
   fetchList()
 }
 
 function handleSizeChange(size) {
+  if (pagination.value.pageSize === size) return
   pagination.value.pageSize = size
   pagination.value.page = 1
   fetchList()
 }
 
 function onSelectionChange(rows) {
-  selectedRows.value = Array.isArray(rows) ? rows : []
+  const nextRows = Array.isArray(rows) ? rows : []
+  selectedRows.value = nextRows === selectedRows.value ? selectedRows.value : nextRows
 }
 
 function openAudit(row, nextStatus) {
@@ -121,22 +143,42 @@ async function batchDelete() {
   }
 }
 
-async function batchApproveAll() {
+async function batchApproveSelected() {
   if (!isDean.value) return
+  const ids = (selectedRows.value || [])
+    .filter((r) => r?.status === 'pending')
+    .map((r) => r?.id)
+    .filter((x) => typeof x === 'number' && Number.isFinite(x))
+
+  if (ids.length === 0) {
+    ElMessage.warning('请先勾选要通过的待审核资源')
+    return
+  }
+
   try {
-    await ElMessageBox.confirm('确认要一键通过所有待审核的资源吗？', '一键通过确认', { type: 'success', confirmButtonText: '确定通过', cancelButtonText: '取消' })
+    await ElMessageBox.confirm(
+      `确认一键通过已选中的 ${ids.length} 个待审核资源吗？未勾选的资源不会被处理。`,
+      '批量通过确认',
+      { type: 'success', confirmButtonText: '确定通过', cancelButtonText: '取消' },
+    )
   } catch {
     return
   }
-  approvingAll.value = true
+
+  approvingSelected.value = true
   try {
-    const resp = await api.post('/api/resources/batch-approve-all')
-    ElMessage.success(`成功一键通过 ${resp.data.count || 0} 个资源`)
+    let count = 0
+    for (const id of ids) {
+      await api.patch(`/api/resources/${id}/audit`, { status: 'approved' })
+      count += 1
+    }
+    ElMessage.success(`成功通过 ${count} 个资源`)
+    selectedRows.value = []
     await fetchList()
   } catch (e) {
-    ElMessage.error(e?.response?.data?.error?.message || '操作失败')
+    ElMessage.error(e?.response?.data?.error?.message || '批量通过失败')
   } finally {
-    approvingAll.value = false
+    approvingSelected.value = false
   }
 }
 
@@ -176,36 +218,27 @@ onMounted(fetchList)
           </div>
           <div class="toolbar-actions audit-actions">
             <el-tag v-if="!canAudit && !isSystemAdmin" type="warning">无审核权限</el-tag>
-            <div class="status-switcher">
-              <el-button-group>
-                <el-button
-                  :type="state.status === 'pending' ? 'warning' : 'default'"
-                  :disabled="!canAudit"
-                  @click="state.status = 'pending'; pagination.page = 1; fetchList()"
-                >
-                  待审核（{{ pendingCount }}）
-                </el-button>
-                <el-button
-                  :type="state.status === 'rejected' ? 'danger' : 'default'"
-                  @click="state.status = 'rejected'; pagination.page = 1; fetchList()"
-                >
-                  已拒绝（{{ rejectedCount }}）
-                </el-button>
-                <el-button
-                  :type="state.status === 'approved' ? 'success' : 'default'"
-                  :disabled="!canBatchDelete"
-                  @click="state.status = 'approved'; pagination.page = 1; fetchList()"
-                >
-                  已通过（{{ approvedCount }}）
-                </el-button>
-              </el-button-group>
+            <div class="audit-actions__fixed">
+              <div class="status-switcher">
+                <el-button-group>
+                  <el-button
+                    v-for="tab in statusTabs"
+                    :key="tab.key"
+                    :type="state.status === tab.key ? tab.type : 'default'"
+                    :disabled="tab.key === 'pending' ? !canAudit : tab.key === 'approved' ? !canBatchDelete : false"
+                    @click="switchStatus(tab.key)"
+                  >
+                    {{ tab.label }}（{{ tab.count }}）
+                  </el-button>
+                </el-button-group>
+              </div>
+              <div class="audit-actions__primary">
+                <el-button type="primary" :loading="loading" @click="fetchList">刷新</el-button>
+              </div>
             </div>
-            <el-button type="primary" :loading="loading" @click="fetchList">刷新</el-button>
-            <div style="min-width: 108px; display: flex; justify-content: center;">
-              <el-button v-if="isDean && state.status === 'pending'" type="success" :loading="approvingAll" @click="batchApproveAll">
-                一键通过
-              </el-button>
-            </div>
+            <el-button v-if="isDean && state.status === 'pending'" type="success" :loading="approvingSelected" :disabled="selectedRows.length === 0" @click="batchApproveSelected">
+              批量通过
+            </el-button>
             <el-button v-if="canBatchDelete" type="danger" :disabled="(selectedRows || []).length === 0" :loading="deleting" @click="batchDelete">批量删除</el-button>
           </div>
         </div>
@@ -267,7 +300,7 @@ onMounted(fetchList)
           v-model:current-page="pagination.page"
           v-model:page-size="pagination.pageSize"
           :total="pagination.total"
-          :page-sizes="[10, 20, 50, 100]"
+          :page-sizes="[10, 20, 50]"
           layout="共, sizes, prev, pager, next, jumper"
           background
           @current-change="handlePageChange"
@@ -296,3 +329,32 @@ onMounted(fetchList)
     </el-dialog>
   </div>
 </template>
+
+<style>
+.audit-actions {
+  flex-wrap: nowrap;
+}
+
+.audit-actions__fixed {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  min-width: max-content;
+}
+
+.audit-actions__primary {
+  width: 88px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.audit-actions__primary .el-button {
+  width: 88px;
+}
+
+.status-switcher {
+  flex: 0 0 auto;
+  min-width: max-content;
+}
+</style>

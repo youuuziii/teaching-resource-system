@@ -37,6 +37,7 @@ const createForm = ref({ name: '', code: '', major_ids: [], description: '' })
 const tempAssignment = ref({ department_id: null, major_ids: [] })
 const departments = ref([])
 const majors = ref([])
+const departmentFilter = ref('')
 
 const assignOpen = ref(false)
 const assignLoading = ref(false)
@@ -77,7 +78,14 @@ function removeMajorFromForm(mid) {
 async function fetchCourses() {
   loading.value = true
   try {
-    const resp = await api.get('/api/courses', { params: { q: (keyword.value || '').trim() || undefined, page: pagination.value.page, page_size: pagination.value.pageSize } })
+    const resp = await api.get('/api/courses', {
+      params: {
+        q: (keyword.value || '').trim() || undefined,
+        department_id: departmentFilter.value || undefined,
+        page: pagination.value.page,
+        page_size: pagination.value.pageSize,
+      },
+    })
     courses.value = resp.data.items || []
     pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
   } catch (e) {
@@ -95,6 +103,11 @@ function handlePageChange(page) {
 
 function handleSizeChange(size) {
   pagination.value.pageSize = size
+  pagination.value.page = 1
+  fetchCourses().then(refreshAssignedMap)
+}
+
+function handleDepartmentFilterChange() {
   pagination.value.page = 1
   fetchCourses().then(refreshAssignedMap)
 }
@@ -314,6 +327,16 @@ onMounted(async () => {
               :prefix-icon="Search"
               @keyup.enter="async () => { await fetchCourses(); await refreshAssignedMap() }" 
             />
+            <el-select
+              v-model="departmentFilter"
+              clearable
+              filterable
+              placeholder="按学院筛选"
+              style="width: 180px"
+              @change="handleDepartmentFilterChange"
+            >
+              <el-option v-for="d in departments" :key="d.id" :label="d.name" :value="d.id" />
+            </el-select>
             <el-button type="warning" plain :icon="Refresh" @click="syncGraph">重构图谱</el-button>
             <el-button type="primary" :icon="Plus" @click="openCreate">新增课程</el-button>
           </div>
@@ -373,7 +396,7 @@ onMounted(async () => {
           v-model:current-page="pagination.page"
           v-model:page-size="pagination.pageSize"
           :total="pagination.total"
-          :page-sizes="[6, 10, 20, 50, 100]"
+          :page-sizes="[6, 12, 24]"
           layout="共, sizes, prev, pager, next, jumper"
           background
           @current-change="handlePageChange"

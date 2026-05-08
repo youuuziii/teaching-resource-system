@@ -416,7 +416,7 @@ onMounted(async () => {
               v-model:current-page="usersPagination.page"
               v-model:page-size="usersPagination.pageSize"
               :total="usersPagination.total"
-              :page-sizes="[10, 20, 50, 100]"
+              :page-sizes="[10, 20, 50]"
               layout="total, sizes, prev, pager, next, jumper"
               background
               @current-change="handleUsersPageChange"

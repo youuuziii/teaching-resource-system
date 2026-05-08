@@ -74,6 +74,10 @@ const batchSubmitting = ref(false)
 const batchResults = ref([])
 const batchChapterId = ref(null)
 const batchSectionId = ref(null)
+const batchResultsMaxHeight = computed(() => {
+  const rows = Math.max(batchResults.value.length, 1)
+  return Math.min(64 + rows * 48, 360)
+})
 
 const catalogFile = ref(null)
 const catalogSubmitting = ref(false)
@@ -112,10 +116,8 @@ const batchSections = computed(() => {
   return allSections.value.filter(s => String(s.chapter_id) === String(batchChapterId.value))
 })
 
-const uploadSections = computed(() => {
-  if (!uploadForm.value.chapter_id) return []
-  return allSections.value.filter(s => String(s.chapter_id) === String(uploadForm.value.chapter_id))
-})
+const uploadSections = ref([])
+const loadingUploadSections = ref(false)
 
 const uploadKpOptions = computed(() => {
   if (!courseId.value) return []
@@ -297,6 +299,22 @@ async function fetchSectionsForKp() {
     allSections.value = resp.data.items || []
   } catch (e) {
     allSections.value = []
+  }
+}
+
+async function fetchUploadSections() {
+  if (!isNumberValue(uploadForm.value.chapter_id)) {
+    uploadSections.value = []
+    return
+  }
+  loadingUploadSections.value = true
+  try {
+    const resp = await api.get('/api/sections', { params: { chapter_id: uploadForm.value.chapter_id } })
+    uploadSections.value = resp.data.items || []
+  } catch (e) {
+    uploadSections.value = []
+  } finally {
+    loadingUploadSections.value = false
   }
 }
 
@@ -669,6 +687,7 @@ watch(courseId, async () => {
   chapterId.value = null
   sectionId.value = null
   uploadForm.value = { title: '', description: '', chapter_id: null, section_id: null, knowledge_point_id: null, file: null }
+  uploadSections.value = []
   batchChapterId.value = null
   batchSectionId.value = null
   kpForm.value.chapter_id = null
@@ -681,6 +700,12 @@ watch(chapterId, async () => {
   uploadForm.value.section_id = null
   batchSectionId.value = null
   await fetchSections()
+})
+
+watch(() => uploadForm.value.chapter_id, async () => {
+  uploadForm.value.section_id = null
+  uploadForm.value.knowledge_point_id = null
+  await fetchUploadSections()
 })
 
 watch(sectionId, async () => {
@@ -912,14 +937,14 @@ onMounted(async () => {
                     <el-row :gutter="20">
                       <el-col :span="8">
                         <el-form-item label="关联章节（可选）">
-                          <el-select v-model="uploadForm.chapter_id" filterable clearable placeholder="不选则关联课程" style="width: 100%" @change="uploadForm.section_id = null; uploadForm.knowledge_point_id = null">
+                          <el-select v-model="uploadForm.chapter_id" filterable clearable placeholder="不选则关联课程" style="width: 100%">
                             <el-option v-for="ch in chapters" :key="ch.id" :label="ch.name" :value="ch.id" />
                           </el-select>
                         </el-form-item>
                       </el-col>
                       <el-col :span="8">
                         <el-form-item label="关联小节（可选）">
-                          <el-select v-model="uploadForm.section_id" filterable clearable placeholder="不选则关联章节" style="width: 100%" @change="uploadForm.knowledge_point_id = null">
+                          <el-select v-model="uploadForm.section_id" filterable clearable placeholder="请先选择章节" style="width: 100%" :loading="loadingUploadSections" :disabled="!uploadForm.chapter_id">
                             <el-option v-for="s in uploadSections" :key="s.id" :label="s.name" :value="s.id" />
                           </el-select>
                         </el-form-item>
@@ -991,9 +1016,9 @@ onMounted(async () => {
                     </el-button>
                   </div>
 
-                  <div v-if="batchResults.length > 0" class="batch-results">
+                  <div v-if="batchResults.length > 0" class="batch-results" :style="{ maxHeight: `${batchResultsMaxHeight + 88}px` }">
                     <el-divider>处理结果</el-divider>
-                    <el-table :data="batchResults" size="small" border stripe>
+                    <el-table :data="batchResults" size="small" border stripe :max-height="batchResultsMaxHeight">
                       <el-table-column prop="filename" label="文件名" />
                       <el-table-column prop="chapter" label="章节" />
                       <el-table-column prop="section" label="小节" />
@@ -1562,6 +1587,26 @@ onMounted(async () => {
 
 .batch-results {
   margin-top: 20px;
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+}
+
+.batch-results :deep(.el-table) {
+  width: 100%;
+}
+
+.batch-results :deep(.el-table__body-wrapper),
+.batch-results :deep(.el-scrollbar__wrap) {
+  overflow-x: auto;
+}
+
+.batch-results :deep(.el-table__body-wrapper) {
+  height: auto !important;
+  max-height: 320px;
+}
+
+.batch-results :deep(.el-table__empty-block) {
+  min-height: 0;
 }
 
 .no-file {
