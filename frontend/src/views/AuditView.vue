@@ -45,11 +45,23 @@ const STATUS_META = {
   approved: { label: '已通过', type: 'success' },
 }
 
+function rowTypeLabel(row) {
+  return row?.delete_request_status === 'pending' ? '删除申请' : '资源申请'
+}
+
+function rowReason(row) {
+  return row?.delete_request_comment || row?.audit_comment || '-'
+}
+
 const statusTabs = computed(() => [
   { key: 'pending', count: pendingCount.value, ...STATUS_META.pending },
   { key: 'rejected', count: rejectedCount.value, ...STATUS_META.rejected },
   { key: 'approved', count: approvedCount.value, ...STATUS_META.approved },
 ])
+
+function rowStatus(row) {
+  return row?.delete_request_status === 'pending' ? 'pending' : row?.status
+}
 
 function statusTagType(status) {
   return STATUS_META[status]?.type || 'info'
@@ -146,7 +158,7 @@ async function batchDelete() {
 async function batchApproveSelected() {
   if (!isDean.value) return
   const ids = (selectedRows.value || [])
-    .filter((r) => r?.status === 'pending')
+    .filter((r) => rowStatus(r) === 'pending')
     .map((r) => r?.id)
     .filter((x) => typeof x === 'number' && Number.isFinite(x))
 
@@ -254,7 +266,14 @@ onMounted(fetchList)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="知识点" min-width="180">
+        <el-table-column label="类型" width="110">
+          <template #default="{ row }">
+            <el-tag :type="rowTypeLabel(row) === '删除申请' ? 'danger' : 'success'" size="small" effect="dark" class="type-tag">
+              {{ rowTypeLabel(row) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="知识点" min-width="160">
           <template #default="{ row }">
             <div class="tag-wrap">
               <template v-if="(row.knowledge_points || []).length > 0">
@@ -264,7 +283,7 @@ onMounted(fetchList)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="教师" min-width="180">
+        <el-table-column label="教师" min-width="150">
           <template #default="{ row }">
             <div class="tag-wrap">
               <span v-if="(row.teachers || []).length === 0" class="empty-text">-</span>
@@ -272,24 +291,29 @@ onMounted(fetchList)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="标签" min-width="180">
+        <el-table-column label="标签" min-width="150">
           <template #default="{ row }">
             <div class="tag-wrap">
               <el-tag v-for="t in row.tags || []" :key="t" size="small" effect="plain" type="warning">{{ t }}</el-tag>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="110">
+        <el-table-column label="申请原因" min-width="180">
           <template #default="{ row }">
-            <el-tag :type="statusTagType(row.status)" effect="dark">{{ statusText(row.status) }}</el-tag>
+            <span class="reason-text">{{ rowReason(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240" fixed="right">
+        <el-table-column prop="status" label="状态" width="92">
+          <template #default="{ row }">
+            <el-tag :type="statusTagType(rowStatus(row))" effect="dark">{{ statusText(rowStatus(row)) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
             <div class="audit-row-actions">
-              <el-button v-if="canAudit && row.status === 'pending'" size="small" type="success" @click="openAudit(row, 'approved')">通过</el-button>
-              <el-button v-if="canAudit && row.status === 'pending'" size="small" type="danger" @click="openAudit(row, 'rejected')">拒绝</el-button>
-              <el-button v-if="canAudit && row.status === 'rejected'" size="small" @click="openAudit(row, 'approved')">改为通过</el-button>
+              <el-button v-if="canAudit && rowStatus(row) === 'pending'" size="small" type="success" @click="openAudit(row, 'approved')">通过</el-button>
+              <el-button v-if="canAudit && rowStatus(row) === 'pending'" size="small" type="danger" @click="openAudit(row, 'rejected')">拒绝</el-button>
+              <el-button v-if="canAudit && rowStatus(row) === 'rejected' && !row.delete_request_status" size="small" @click="openAudit(row, 'approved')">改为通过</el-button>
             </div>
           </template>
         </el-table-column>
@@ -338,23 +362,53 @@ onMounted(fetchList)
 .audit-actions__fixed {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   flex: 0 0 auto;
   min-width: max-content;
 }
 
 .audit-actions__primary {
-  width: 88px;
+  width: 76px;
   display: flex;
   justify-content: flex-start;
 }
 
 .audit-actions__primary .el-button {
-  width: 88px;
+  width: 76px;
 }
 
 .status-switcher {
   flex: 0 0 auto;
   min-width: max-content;
+}
+
+.type-tag {
+  margin: 0;
+}
+
+.resource-title-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.resource-title-main {
+  line-height: 1.25;
+}
+
+.resource-title-sub {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.reason-text {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.audit-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
 }
 </style>

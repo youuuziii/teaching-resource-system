@@ -588,14 +588,45 @@ async function submitUpload() {
 }
 
 async function removeResource(row) {
+  const isApproved = row?.status === 'approved'
+  const hasPendingDeleteRequest = row?.delete_request_status === 'pending'
+  const confirmText = isApproved
+    ? '已审核通过的资源删除后需要教务管理员审核，是否继续提交删除申请？'
+    : `确认删除资源「${row.title}」吗？`
+
   try {
-    await ElMessageBox.confirm(`确认删除资源「${row.title}」吗？`, '删除确认', { type: 'warning' })
+    await ElMessageBox.confirm(confirmText, '删除确认', { type: 'warning' })
   } catch {
     return
   }
+
   try {
-    await api.delete(`/api/resources/${row.id}`)
-    ElMessage.success('资源已删除')
+    if (isApproved) {
+      if (hasPendingDeleteRequest) {
+        ElMessage.warning('该资源已存在待审核的删除申请')
+        return
+      }
+      const { value: comment } = await ElMessageBox.prompt('请输入删除原因（可选）', '删除资源申请', {
+        confirmButtonText: '提交申请',
+        cancelButtonText: '取消',
+        inputPlaceholder: '例如：内容过期 / 需要重新整理 / 发现错误',
+        inputValidator: (v) => (v && String(v).length > 500 ? '原因不能超过500字' : true),
+      }).catch((e) => (e === 'cancel' ? { value: '' } : Promise.reject(e)))
+
+      const resp = await api.post(`/api/resources/${row.id}/delete-request`, {
+        comment: comment || '',
+      })
+      if (resp.data?.status === 'pending') {
+        ElMessage.success('删除申请已提交，等待教务管理员审核')
+      } else if (resp.data?.status === 'deleted') {
+        ElMessage.success('资源已删除')
+      } else {
+        ElMessage.success('操作成功')
+      }
+    } else {
+      await api.delete(`/api/resources/${row.id}`)
+      ElMessage.success('资源已删除')
+    }
     await fetchMyResources()
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '删除失败')
@@ -960,9 +991,9 @@ onMounted(async () => {
                     <div class="upload-footer">
                       <div class="file-input-wrapper">
                         <el-button type="info" plain :icon="Upload">选择文件</el-button>
-                        <input type="file" accept=".pdf,.doc,.docx,.pptx,.xlsx,.txt" :disabled="uploadSubmitting" @change="onFileChange" class="hidden-input" />
+                        <input type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xlsx,.txt" :disabled="uploadSubmitting" @change="onFileChange" class="hidden-input" />
                         <span v-if="uploadForm.file" class="file-name">{{ uploadForm.file.name }}</span>
-                        <span v-else class="no-file">未选择文件 (支持 PDF, Word, PPT, Excel, TXT)</span>
+                        <span v-else class="no-file">未选择文件 (支持 PDF, Word, PPT/PPTX, Excel, TXT)</span>
                       </div>
                       <el-button type="success" :loading="uploadSubmitting" @click="submitUpload" :disabled="!uploadForm.file">
                         开始上传
@@ -1007,9 +1038,9 @@ onMounted(async () => {
                   <div class="upload-footer" style="margin-top: 20px">
                     <div class="file-input-wrapper">
                       <el-button type="primary" plain :icon="Upload">多选文件</el-button>
-                      <input type="file" multiple accept=".pdf,.doc,.docx,.pptx,.xlsx,.txt" :disabled="batchSubmitting" @change="onBatchFileChange" class="hidden-input batch-hidden-input" />
+                      <input type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xlsx,.txt" :disabled="batchSubmitting" @change="onBatchFileChange" class="hidden-input batch-hidden-input" />
                       <span v-if="batchFiles.length > 0" class="file-name">已选择 {{ batchFiles.length }} 份文件</span>
-                      <span v-else class="no-file">支持多选 PDF, Word, PPT, Excel, TXT 文件</span>
+                      <span v-else class="no-file">支持多选 PDF, Word, PPT/PPTX, Excel, TXT 文件</span>
                     </div>
                     <el-button type="success" :loading="batchSubmitting" @click="submitBatchUpload" :disabled="batchFiles.length === 0">
                       一键处理并上传

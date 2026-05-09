@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
   Download, 
   Star, 
@@ -14,7 +14,8 @@ import {
   Document,
   Check,
   Close,
-  Timer
+  Timer,
+  Delete
 } from '@element-plus/icons-vue'
 import api from '../api/client'
 
@@ -36,7 +37,19 @@ const roles = computed(() => {
     return []
   }
 })
+const currentUserId = computed(() => {
+  try {
+    const u = JSON.parse(localStorage.getItem('user') || 'null')
+    return u?.id || null
+  } catch {
+    return null
+  }
+})
+const isTeacher = computed(() => roles.value.includes('teacher'))
 const canFavorite = computed(() => isAuthed.value && roles.value.includes('student'))
+const isOwnerTeacher = computed(() => isTeacher.value && resource.value && Number(resource.value.created_by) === Number(currentUserId.value))
+const canDeleteResource = computed(() => isOwnerTeacher.value && !resource.value?.delete_request_status)
+const hasPendingDeleteRequest = computed(() => resource.value?.delete_request_status === 'pending')
 
 async function fetchDetail() {
   loading.value = true
@@ -54,6 +67,55 @@ async function fetchDetail() {
 
 function goBack() {
   router.back()
+}
+
+async function requestDelete() {
+  if (!resource.value) return
+  try {
+    await ElMessageBox.confirm('确定要提交删除申请吗？已审核通过的资源需要教务管理员审核后才能删除。', '删除资源', {
+      confirmButtonText: '提交申请',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    const { value: comment } = await ElMessageBox.prompt('请输入删除原因（可选）', '删除资源申请', {
+      confirmButtonText: '提交',
+      cancelButtonText: '取消',
+      inputPlaceholder: '例如：资源已过期 / 内容有误 / 需要重新上传',
+      inputValidator: (v) => (v && String(v).length > 500 ? '原因不能超过500字' : true),
+    }).catch((e) => (e === 'cancel' ? { value: '' } : Promise.reject(e)))
+
+    const resp = await api.post(`/api/resources/${resource.value.id}/delete-request`, {
+      comment: comment || '',
+    })
+    resource.value = resp.data.resource || resource.value
+    ElMessage.success(resp.data.status === 'pending' ? '删除申请已提交，等待审核' : '资源已删除')
+    if (resp.data.status === 'deleted') {
+      router.push('/resources')
+      return
+    }
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.error?.message || '提交删除申请失败')
+    }
+  }
+}
+
+async function cancelDeleteRequest() {
+  if (!resource.value) return
+  try {
+    await ElMessageBox.confirm('确定要撤销删除申请吗？', '撤销申请', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    const resp = await api.post(`/api/resources/${resource.value.id}/delete-request/cancel`)
+    resource.value = resp.data.resource || resource.value
+    ElMessage.success('删除申请已撤销')
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.error?.message || '撤销申请失败')
+    }
+  }
 }
 
 function download() {
@@ -112,6 +174,24 @@ onMounted(fetchDetail)
           @click="toggleFavorite"
         >
           {{ resource.is_favorited ? '取消收藏' : '加入收藏' }}
+        </el-button>
+        <el-button 
+          v-if="resource && canDeleteResource" 
+          type="danger" 
+          plain
+          :icon="Delete"
+          @click="requestDelete"
+        >
+          删除资源
+        </el-button>
+        <el-button 
+          v-else-if="resource && hasPendingDeleteRequest" 
+          type="warning" 
+          plain
+          :icon="Delete"
+          @click="cancelDeleteRequest"
+        >
+          撤销申请
         </el-button>
         <el-button 
           v-if="resource" 
@@ -222,6 +302,37 @@ onMounted(fetchDetail)
                     <div class="meta-value">{{ resource.audited_at ? new Date(resource.audited_at).toLocaleString() : '等待中' }}</div>
                   </div>
                 </div>
+
+                <template v-if="resource.delete_request_status">
+                  <el-divider />
+                  <h3 class="sidebar-title">删除申请</h3>
+                  <div class="meta-list">
+                    <div class="meta-item">
+                      <el-icon><Timer /></el-icon>
+                      <div class="meta-label">申请状态</div>
+                      <div class="meta-value">
+                        <el-tag :type="resource.delete_request_status === 'pending' ? 'warning' : (resource.delete_request_status === 'rejected' ? 'danger' : 'success')" effect="dark">
+                          {{ resource.delete_request_status === 'pending' ? '审核中' : (resource.delete_request_status === 'rejected' ? '已拒绝' : '已通过') }}
+                        </el-tag>
+                      </div>
+                    </div>
+                    <div class="meta-item">
+                      <el-icon><Calendar /></el-icon>
+                      <div class="meta-label">申请时间</div>
+                      <div class="meta-value">{{ resource.delete_requested_at ? new Date(resource.delete_requested_at).toLocaleString() : '-' }}</div>
+                    </div>
+                    <div class="meta-item">
+                      <el-icon><User /></el-icon>
+                      <div class="meta-label">审核人</div>
+                      <div class="meta-value">{{ resource.delete_request_audited_by || '-' }}</div>
+                    </div>
+                    <div class="meta-item">
+                      <el-icon><Check /></el-icon>
+                      <div class="meta-label">审核意见</div>
+                      <div class="meta-value">{{ resource.delete_request_audit_comment || '无' }}</div>
+                    </div>
+                  </div>
+                </template>
               </el-card>
             </el-col>
           </el-row>

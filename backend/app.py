@@ -364,6 +364,13 @@ class Resource(Base):
     suggestion: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     audited_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
     audited_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    delete_requested_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    delete_requested_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    delete_request_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    delete_request_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    delete_request_audited_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    delete_request_audited_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+    delete_request_audit_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
@@ -1484,6 +1491,20 @@ def _create_app() -> Flask:
                 to_add.append(("audited_by", "INTEGER"))
             if "audited_at" not in cols:
                 to_add.append(("audited_at", "DATETIME"))
+            if "delete_requested_by" not in cols:
+                to_add.append(("delete_requested_by", "INTEGER"))
+            if "delete_requested_at" not in cols:
+                to_add.append(("delete_requested_at", "DATETIME"))
+            if "delete_request_comment" not in cols:
+                to_add.append(("delete_request_comment", "TEXT"))
+            if "delete_request_status" not in cols:
+                to_add.append(("delete_request_status", "VARCHAR(20)"))
+            if "delete_request_audited_by" not in cols:
+                to_add.append(("delete_request_audited_by", "INTEGER"))
+            if "delete_request_audited_at" not in cols:
+                to_add.append(("delete_request_audited_at", "DATETIME"))
+            if "delete_request_audit_comment" not in cols:
+                to_add.append(("delete_request_audit_comment", "TEXT"))
             if "suggestion" not in cols:
                 to_add.append(("suggestion", "JSON"))
             if to_add:
@@ -3273,6 +3294,17 @@ def _create_app() -> Flask:
             db.commit()
             return jsonify({"ok": True})
 
+    @app.delete("/api/notifications/all")
+    def delete_all_notifications():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            db.execute(
+                delete(Notification)
+                .where(Notification.user_id == user.id)
+            )
+            db.commit()
+            return jsonify({"ok": True})
+
     @app.post("/api/notifications/<int:notification_id>/read")
     def read_notification(notification_id: int):
         with SessionLocal() as db:
@@ -3467,7 +3499,7 @@ def _create_app() -> Flask:
 
             original_name = (f.filename or "upload").strip()
             suffix = Path(original_name).suffix.lower()
-            allowed_extensions = {".docx", ".pdf", ".pptx", ".xlsx", ".txt"}
+            allowed_extensions = {".docx", ".pdf", ".ppt", ".pptx", ".xlsx", ".txt"}
             if suffix not in allowed_extensions:
                 raise ApiError("BAD_REQUEST", f"仅支持上传 {', '.join([ext.lstrip('.') for ext in allowed_extensions])} 格式文件", 400)
 
@@ -3650,7 +3682,7 @@ def _create_app() -> Flask:
                     raise ApiError("BAD_REQUEST", "no files uploaded", 400)
 
                 results = []
-                allowed_extensions = {".docx", ".pdf", ".pptx", ".xlsx", ".txt"}
+                allowed_extensions = {".docx", ".pdf", ".ppt", ".pptx", ".xlsx", ".txt"}
                 for f in files:
                     # 使用 savepoint (nested transaction) 确保单个文件失败不影响整个批次
                     sp = db.begin_nested()
@@ -3947,8 +3979,18 @@ def _create_app() -> Flask:
                     if not user_roles.intersection({"dean", "admin", "teacher"}):
                         raise ApiError("FORBIDDEN", "Insufficient role", 403)
 
+                if keyword and keyword.strip() == "删除申请":
+                    q = select(Resource).where(Resource.delete_request_status == "pending")
+                    if user_roles and "teacher" in user_roles and "dean" not in user_roles and "admin" not in user_roles:
+                        q = q.where(Resource.created_by == user.id)
+                    return q
+
             def _build_query(resource_status: str):
-                q = select(Resource).where(Resource.status == resource_status)
+                q = select(Resource)
+                if resource_status == "pending":
+                    q = q.where((Resource.status == "pending") | (Resource.delete_request_status == "pending"))
+                else:
+                    q = q.where(Resource.status == resource_status)
                 if user_roles and resource_status in {"pending", "rejected"}:
                     if "teacher" in user_roles and "dean" not in user_roles and "admin" not in user_roles:
                         q = q.where(Resource.created_by == user.id)
@@ -4061,9 +4103,90 @@ def _create_app() -> Flask:
                 raise ApiError("NOT_FOUND", "resource not found", 404)
             if res.created_by != user.id:
                 raise ApiError("FORBIDDEN", "cannot delete others' resources", 403)
+            if res.status == "approved":
+                raise ApiError("FORBIDDEN", "approved resources require delete approval", 403)
             result = _delete_resource_with_relations(db, res)
             db.commit()
             return jsonify({"ok": True, "result": result})
+
+    @app.post("/api/resources/<int:resource_id>/delete-request")
+    def request_delete_resource(resource_id: int):
+        data = _json()
+        comment = data.get("comment")
+        if comment is not None and not isinstance(comment, str):
+            raise ApiError("BAD_REQUEST", "comment must be string", 400)
+        comment = (comment or "").strip() or None
+
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"teacher"})
+            res = db.get(Resource, resource_id)
+            if not res:
+                raise ApiError("NOT_FOUND", "resource not found", 404)
+            if res.created_by != user.id:
+                raise ApiError("FORBIDDEN", "cannot delete others' resources", 403)
+            if res.delete_request_status == "pending":
+                raise ApiError("FORBIDDEN", "delete request already pending", 403)
+
+            if res.status == "approved":
+                res.delete_requested_by = user.id
+                res.delete_requested_at = dt.datetime.now(dt.UTC)
+                res.delete_request_comment = comment
+                res.delete_request_status = "pending"
+                res.delete_request_audited_by = None
+                res.delete_request_audited_at = None
+                res.delete_request_audit_comment = None
+                db.add(Notification(
+                    user_id=res.created_by,
+                    title="资源删除申请已提交",
+                    content=f"您提交了资源《{res.title}》的删除申请，等待教务管理员审核。",
+                    type="delete_request",
+                    related_id=res.id,
+                ))
+                dean_ids = [d.user_id for d in db.execute(select(Dean).where(Dean.user_id.isnot(None))).scalars().all()]
+                for uid in [uid for uid in dean_ids if uid is not None]:
+                    db.add(Notification(
+                        user_id=uid,
+                        title="资源删除申请待审核",
+                        content=f"教师提交了资源《{res.title}》的删除申请，请及时审核。",
+                        type="delete_request",
+                        related_id=res.id,
+                    ))
+                db.commit()
+                return jsonify({"ok": True, "status": "pending", "resource": _resource_dto(res)})
+
+            result = _delete_resource_with_relations(db, res)
+            db.commit()
+            return jsonify({"ok": True, "status": "deleted", "result": result})
+
+    @app.post("/api/resources/<int:resource_id>/delete-request/cancel")
+    def cancel_delete_request(resource_id: int):
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"teacher"})
+            res = db.get(Resource, resource_id)
+            if not res:
+                raise ApiError("NOT_FOUND", "resource not found", 404)
+            if res.created_by != user.id:
+                raise ApiError("FORBIDDEN", "cannot cancel others' requests", 403)
+            if res.delete_request_status != "pending":
+                raise ApiError("FORBIDDEN", "no pending delete request", 403)
+            res.delete_requested_by = None
+            res.delete_requested_at = None
+            res.delete_request_comment = None
+            res.delete_request_status = None
+            res.delete_request_audited_by = None
+            res.delete_request_audited_at = None
+            res.delete_request_audit_comment = None
+            db.add(Notification(
+                user_id=res.created_by,
+                title="资源删除申请已撤销",
+                content=f"您已撤销资源《{res.title}》的删除申请。",
+                type="delete_request_cancel",
+                related_id=res.id,
+            ))
+            db.commit()
+            return jsonify({"ok": True, "resource": _resource_dto(res)})
 
     @app.post("/api/resources/batch-delete")
     def batch_delete_resources():
@@ -4122,8 +4245,48 @@ def _create_app() -> Flask:
             res = db.get(Resource, resource_id)
             if not res:
                 raise ApiError("NOT_FOUND", "resource not found", 404)
-            if res.status != "pending":
-                raise ApiError("FORBIDDEN", "Only pending resources can be audited", 403)
+
+            is_delete_request = res.delete_request_status == "pending"
+            if is_delete_request:
+                if res.status != "approved":
+                    raise ApiError("FORBIDDEN", "Only approved resources can be audited for deletion", 403)
+            else:
+                if res.status != "pending":
+                    raise ApiError("FORBIDDEN", "Only pending resources can be audited", 403)
+
+            if is_delete_request:
+                res.delete_request_status = status
+                res.delete_request_audited_by = user.id
+                res.delete_request_audited_at = dt.datetime.now(dt.UTC)
+                res.delete_request_audit_comment = comment
+                teacher_id = res.delete_requested_by or res.created_by
+                delete_title = res.title
+                if status == "approved":
+                    result = _delete_resource_with_relations(db, res)
+                    db.add(Notification(
+                        user_id=teacher_id,
+                        title="资源删除申请审核结果",
+                        content=f"您提交的资源《{delete_title}》删除申请已通过，资源将被删除。审核意见：{comment or '无'}",
+                        type="delete_request_result",
+                        related_id=resource_id,
+                    ))
+                    db.commit()
+                    return jsonify({"resource_id": resource_id, "audit_type": "delete_request", "status": status, "result": result})
+                else:
+                    db.add(Notification(
+                        user_id=teacher_id,
+                        title="资源删除申请审核结果",
+                        content=f"您提交的资源《{delete_title}》删除申请已被拒绝。审核意见：{comment or '无'}",
+                        type="delete_request_result",
+                        related_id=resource_id,
+                    ))
+                    res.delete_requested_by = None
+                    res.delete_requested_at = None
+                    res.delete_request_comment = None
+                    db.commit()
+                    db.refresh(res)
+                    return jsonify({"resource": _resource_dto(res), "audit_type": "delete_request", "status": status})
+
             res.status = status
             res.audit_comment = comment
             res.audited_by = user.id
@@ -5288,6 +5451,7 @@ def _resource_dto(r: Resource) -> Dict[str, Any]:
         "file_name": r.file_name,
         "file_size": r.file_size,
         "file_type": r.file_type,
+        "created_by": r.created_by,
         "course_id": r.course_id,
         "chapter_id": r.chapter_id,
         "section_id": r.section_id,
@@ -5302,6 +5466,13 @@ def _resource_dto(r: Resource) -> Dict[str, Any]:
         "audit_comment": r.audit_comment,
         "audited_by": r.audited_by,
         "audited_at": r.audited_at.isoformat() if r.audited_at else None,
+        "delete_requested_by": r.delete_requested_by,
+        "delete_requested_at": r.delete_requested_at.isoformat() if r.delete_requested_at else None,
+        "delete_request_comment": r.delete_request_comment,
+        "delete_request_status": r.delete_request_status,
+        "delete_request_audited_by": r.delete_request_audited_by,
+        "delete_request_audited_at": r.delete_request_audited_at.isoformat() if r.delete_request_audited_at else None,
+        "delete_request_audit_comment": r.delete_request_audit_comment,
         "tags": [t.tag for t in r.tags],
         "suggestion": r.suggestion,
         "created_at": r.created_at.isoformat() if r.created_at else None,
