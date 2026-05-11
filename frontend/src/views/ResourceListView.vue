@@ -131,12 +131,17 @@ async function download(item) {
 }
 
 async function favorite(item) {
-  const action = item.is_favorited ? 'unfavorite' : 'favorite'
+  const nextAction = item.is_favorited ? 'unfavorite' : 'favorite'
+  const previous = !!item.is_favorited
+  item.is_favorited = !previous
   try {
-    await api.post(`/api/resources/${item.id}/favorite`, { action })
-    item.is_favorited = !item.is_favorited
-    ElMessage.success(action === 'favorite' ? '已收藏' : '已取消收藏')
+    const resp = await api.post(`/api/resources/${item.id}/favorite`, { action: nextAction })
+    if (typeof resp?.data?.is_favorited === 'boolean') {
+      item.is_favorited = resp.data.is_favorited
+    }
+    ElMessage.success(nextAction === 'favorite' ? '已收藏' : '已取消收藏')
   } catch (e) {
+    item.is_favorited = previous
     ElMessage.error(e?.response?.data?.error?.message || '操作失败')
   }
 }

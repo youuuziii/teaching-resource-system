@@ -154,34 +154,7 @@ async function fetchNotifications() {
 }
 
 function isDeleteRequestNotification(n) {
-  return n?.type === 'delete_request' || /删除资源申请/.test(`${n?.title || ''}${n?.content || ''}`)
-}
-
-async function cancelDeleteRequest(notification) {
-  try {
-    await ElMessageBox.confirm(
-      '确定要撤销这条删除申请吗？撤销后管理员将不再处理该申请。',
-      '撤销申请',
-      {
-        confirmButtonText: '确定撤销',
-        cancelButtonText: '取消',
-        type: 'warning',
-      }
-    )
-    await api.delete(`/api/notifications/${notification.id}`)
-    notifications.value = notifications.value.filter(n => n.id !== notification.id)
-    notifPagination.value.total = Math.max(0, notifPagination.value.total - 1)
-    if (notifications.value.length === 0 && notifPagination.value.page > 1) {
-      notifPagination.value.page -= 1
-      await fetchNotifications()
-    }
-    window.dispatchEvent(new Event('notification-updated'))
-    ElMessage.success('删除申请已撤销')
-  } catch (e) {
-    if (e !== 'cancel' && e !== 'close') {
-      ElMessage.error('撤销失败')
-    }
-  }
+  return n?.type === 'delete_request' || /删除申请/.test(`${n?.title || ''}${n?.content || ''}`)
 }
 
 function handleNotifPageChange(page) {
@@ -358,16 +331,6 @@ onMounted(async () => {
                         <el-tag v-if="!n.is_read" size="small" type="danger" effect="dark" dot>新</el-tag>
                       </div>
                       <div class="notif-actions">
-                        <el-button 
-                          v-if="isDeleteRequestNotification(n) && roles.includes('teacher')"
-                          size="small"
-                          type="warning"
-                          plain
-                          class="cancel-delete-btn"
-                          @click.stop="cancelDeleteRequest(n)"
-                        >
-                          撤销申请
-                        </el-button>
                         <el-button 
                           size="small" 
                           type="danger" 
