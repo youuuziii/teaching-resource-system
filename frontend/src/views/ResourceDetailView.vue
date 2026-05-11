@@ -28,23 +28,19 @@ const resource = ref(null)
 const createdByUser = ref(null)
 const auditedByUser = ref(null)
 
-const isAuthed = computed(() => (localStorage.getItem('token') || '').length > 0)
-const roles = computed(() => {
+const storedUser = computed(() => {
   try {
-    const u = JSON.parse(localStorage.getItem('user') || 'null')
-    return Array.isArray(u?.roles) ? u.roles : []
-  } catch {
-    return []
-  }
-})
-const currentUserId = computed(() => {
-  try {
-    const u = JSON.parse(localStorage.getItem('user') || 'null')
-    return u?.id || null
+    return JSON.parse(localStorage.getItem('user') || 'null') || null
   } catch {
     return null
   }
 })
+const isAuthed = computed(() => (localStorage.getItem('token') || '').length > 0)
+const roles = computed(() => {
+  const u = storedUser.value
+  return Array.isArray(u?.roles) ? u.roles : []
+})
+const currentUserId = computed(() => storedUser.value?.id ?? null)
 const isTeacher = computed(() => roles.value.includes('teacher'))
 const canFavorite = computed(() => isAuthed.value && roles.value.includes('student'))
 const isOwnerTeacher = computed(() => isTeacher.value && resource.value && Number(resource.value.created_by) === Number(currentUserId.value))
@@ -77,15 +73,30 @@ async function requestDelete() {
       cancelButtonText: '取消',
       type: 'warning',
     })
-    const { value: comment } = await ElMessageBox.prompt('请输入删除原因（可选）', '删除资源申请', {
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e?.message || '操作失败')
+    return
+  }
+
+  let comment = ''
+  try {
+    const result = await ElMessageBox.prompt('请输入删除原因（可选）', '删除资源申请', {
       confirmButtonText: '提交',
       cancelButtonText: '取消',
       inputPlaceholder: '例如：资源已过期 / 内容有误 / 需要重新上传',
       inputValidator: (v) => (v && String(v).length > 500 ? '原因不能超过500字' : true),
-    }).catch((e) => (e === 'cancel' ? { value: '' } : Promise.reject(e)))
+    })
+    comment = result?.value || ''
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e?.message || '操作失败')
+    return
+  }
 
+  try {
     const resp = await api.post(`/api/resources/${resource.value.id}/delete-request`, {
-      comment: comment || '',
+      comment,
     })
     resource.value = resp.data.resource || resource.value
     ElMessage.success(resp.data.status === 'pending' ? '删除申请已提交，等待审核' : '资源已删除')
@@ -94,9 +105,7 @@ async function requestDelete() {
       return
     }
   } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error(e?.response?.data?.error?.message || '提交删除申请失败')
-    }
+    ElMessage.error(e?.response?.data?.error?.message || '提交删除申请失败')
   }
 }
 
@@ -135,6 +144,35 @@ async function toggleFavorite() {
     ElMessage.success(action === 'favorite' ? '已收藏' : '已取消收藏')
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '操作失败')
+  }
+}
+
+async function deleteResource() {
+  if (!resource.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确定要申请删除该资源吗？提交后需要教务管理员审核，审核通过后才会真正删除，并同步从图谱中移除对应实体节点。',
+      '申请删除',
+      {
+        confirmButtonText: '提交申请',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+
+    const resp = await api.delete(`/api/resources/${resource.value.id}`)
+    if (resp?.data?.mode === 'requested') {
+      ElMessage.success('删除申请提交成功，等待管理员审核')
+      router.replace('/teacher/courses')
+      return
+    }
+    window.dispatchEvent(new Event('graph-updated'))
+    ElMessage.success('资源已删除')
+    router.replace('/teacher/courses')
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      ElMessage.error(e?.response?.data?.error?.message || '删除失败')
+    }
   }
 }
 

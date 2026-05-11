@@ -3988,7 +3988,7 @@ def _create_app() -> Flask:
             def _build_query(resource_status: str):
                 q = select(Resource)
                 if resource_status == "pending":
-                    q = q.where((Resource.status == "pending") | (Resource.delete_request_status == "pending"))
+                    q = q.where(Resource.status == "pending")
                 else:
                     q = q.where(Resource.status == resource_status)
                 if user_roles and resource_status in {"pending", "rejected"}:
@@ -4030,7 +4030,27 @@ def _create_app() -> Flask:
                     cq = _build_query(resource_status)
                     status_counts[resource_status] = db.execute(select(func.count()).select_from(cq.subquery())).scalar_one() or 0
 
-            payload = {"items": [_resource_dto(r) for r in resources], "total": total, "page": page, "page_size": page_size}
+            items = [_resource_dto(r) for r in resources]
+            if current and any(r.name == "student" for r in current.roles) and items:
+                latest_actions = db.execute(
+                    select(UserBehavior.resource_id, UserBehavior.action)
+                    .where(UserBehavior.user_id == current.id)
+                    .where(UserBehavior.action.in_(["favorite", "unfavorite"]))
+                    .where(UserBehavior.resource_id.in_([r.id for r in resources]))
+                    .order_by(UserBehavior.resource_id.asc(), UserBehavior.created_at.desc(), UserBehavior.id.desc())
+                ).all()
+                latest_map: Dict[int, str] = {}
+                for rid, action in latest_actions:
+                    try:
+                        rid_int = int(rid)
+                    except Exception:
+                        continue
+                    if rid_int not in latest_map:
+                        latest_map[rid_int] = str(action)
+                for item in items:
+                    item["is_favorited"] = latest_map.get(int(item["id"]), "") == "favorite"
+
+            payload = {"items": items, "total": total, "page": page, "page_size": page_size}
             if status_counts is not None:
                 payload["status_counts"] = status_counts
             return jsonify(payload)
@@ -4042,6 +4062,7 @@ def _create_app() -> Flask:
             if not res:
                 raise ApiError("NOT_FOUND", "resource not found", 404)
             user_opt: Optional[User] = None
+            is_favorited = False
             if res.status != "approved":
                 user_opt = require_auth(db)
                 roles = {r.name for r in user_opt.roles}
@@ -4054,15 +4075,30 @@ def _create_app() -> Flask:
                 else:
                     raise ApiError("FORBIDDEN", "resource not approved", 403)
             else:
-                # approved resources are visible to everyone
-                pass
+                user_opt = get_current_user(db)
+
+            if user_opt and any(r.name == "student" for r in user_opt.roles):
+                latest_fav = (
+                    db.execute(
+                        select(UserBehavior)
+                        .where(UserBehavior.user_id == user_opt.id)
+                        .where(UserBehavior.resource_id == res.id)
+                        .where(UserBehavior.action.in_(["favorite", "unfavorite"]))
+                        .order_by(UserBehavior.created_at.desc(), UserBehavior.id.desc())
+                    )
+                    .scalars()
+                    .first()
+                )
+                is_favorited = bool(latest_fav and latest_fav.action == "favorite")
 
             created_user = db.get(User, res.created_by)
             audited_user = db.get(User, res.audited_by) if res.audited_by else None
 
+            resource = _resource_dto(res)
+            resource["is_favorited"] = is_favorited
             return jsonify(
                 {
-                    "resource": _resource_dto(res),
+                    "resource": resource,
                     "created_by_user": _user_dto(created_user) if created_user else None,
                     "audited_by_user": _user_dto(audited_user) if audited_user else None,
                 }
@@ -4136,19 +4172,13 @@ def _create_app() -> Flask:
                 res.delete_request_audited_by = None
                 res.delete_request_audited_at = None
                 res.delete_request_audit_comment = None
-                db.add(Notification(
-                    user_id=res.created_by,
-                    title="资源删除申请已提交",
-                    content=f"您提交了资源《{res.title}》的删除申请，等待教务管理员审核。",
-                    type="delete_request",
-                    related_id=res.id,
-                ))
+                teacher_name = user.username or "未知教师"
                 dean_ids = [d.user_id for d in db.execute(select(Dean).where(Dean.user_id.isnot(None))).scalars().all()]
                 for uid in [uid for uid in dean_ids if uid is not None]:
                     db.add(Notification(
                         user_id=uid,
                         title="资源删除申请待审核",
-                        content=f"教师提交了资源《{res.title}》的删除申请，请及时审核。",
+                        content=f"教师 {teacher_name} 提交了资源《{res.title}》的删除申请，请及时审核。",
                         type="delete_request",
                         related_id=res.id,
                     ))
@@ -4171,6 +4201,16 @@ def _create_app() -> Flask:
                 raise ApiError("FORBIDDEN", "cannot cancel others' requests", 403)
             if res.delete_request_status != "pending":
                 raise ApiError("FORBIDDEN", "no pending delete request", 403)
+            teacher_name = user.username or "未知教师"
+            dean_ids = [d.user_id for d in db.execute(select(Dean).where(Dean.user_id.isnot(None))).scalars().all()]
+            for uid in [uid for uid in dean_ids if uid is not None]:
+                db.add(Notification(
+                    user_id=uid,
+                    title="资源删除申请已撤销",
+                    content=f"教师 {teacher_name} 已撤销资源《{res.title}》的删除申请。",
+                    type="delete_request_cancel",
+                    related_id=res.id,
+                ))
             res.delete_requested_by = None
             res.delete_requested_at = None
             res.delete_request_comment = None
@@ -4178,15 +4218,86 @@ def _create_app() -> Flask:
             res.delete_request_audited_by = None
             res.delete_request_audited_at = None
             res.delete_request_audit_comment = None
-            db.add(Notification(
-                user_id=res.created_by,
-                title="资源删除申请已撤销",
-                content=f"您已撤销资源《{res.title}》的删除申请。",
-                type="delete_request_cancel",
-                related_id=res.id,
-            ))
             db.commit()
             return jsonify({"ok": True, "resource": _resource_dto(res)})
+
+    @app.get("/api/admin/delete-requests")
+    def list_admin_delete_requests():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"dean", "admin"})
+            rows = db.execute(
+                select(Resource)
+                .where(Resource.delete_request_status == "pending")
+                .order_by(Resource.delete_requested_at.is_(None), Resource.delete_requested_at.desc())
+            ).scalars().all()
+            items = []
+            for res in rows:
+                course_name = res.course.name if getattr(res, "course", None) else None
+                items.append({
+                    "notification_id": res.id,
+                    "resource_id": res.id,
+                    "resource_title": res.title,
+                    "resource_course": course_name,
+                    "teacher_username": res.created_by_user.username if getattr(res, "created_by_user", None) else None,
+                    "content": res.delete_request_comment or "未填写删除原因",
+                    "requested_at": res.delete_requested_at.isoformat() if res.delete_requested_at else None,
+                    "status": res.delete_request_status,
+                })
+            return jsonify({"items": items, "total": len(items)})
+
+    @app.post("/api/admin/delete-requests/<int:resource_id>/approve")
+    def approve_admin_delete_request(resource_id: int):
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"dean", "admin"})
+            res = db.get(Resource, resource_id)
+            if not res:
+                raise ApiError("NOT_FOUND", "resource not found", 404)
+            if res.delete_request_status != "pending":
+                raise ApiError("FORBIDDEN", "no pending delete request", 403)
+            teacher_id = res.delete_requested_by or res.created_by
+            delete_title = res.title
+            result = _delete_resource_with_relations(db, res)
+            db.add(Notification(
+                user_id=teacher_id,
+                title="资源删除申请审核结果",
+                content=f"您提交的资源《{delete_title}》删除申请已通过，资源将被删除。",
+                type="delete_request_result",
+                related_id=resource_id,
+            ))
+            db.commit()
+            return jsonify({"ok": True, "status": "approved", "result": result})
+
+    @app.post("/api/admin/delete-requests/<int:resource_id>/reject")
+    def reject_admin_delete_request(resource_id: int):
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"dean", "admin"})
+            res = db.get(Resource, resource_id)
+            if not res:
+                raise ApiError("NOT_FOUND", "resource not found", 404)
+            if res.delete_request_status != "pending":
+                raise ApiError("FORBIDDEN", "no pending delete request", 403)
+            teacher_id = res.delete_requested_by or res.created_by
+            delete_title = res.title
+            res.delete_requested_by = None
+            res.delete_requested_at = None
+            res.delete_request_comment = None
+            res.delete_request_status = None
+            res.delete_request_audited_by = user.id
+            res.delete_request_audited_at = dt.datetime.now(dt.UTC)
+            res.delete_request_audit_comment = None
+            db.add(Notification(
+                user_id=teacher_id,
+                title="资源删除申请审核结果",
+                content=f"您提交的资源《{delete_title}》删除申请已被拒绝。",
+                type="delete_request_result",
+                related_id=resource_id,
+            ))
+            db.commit()
+            db.refresh(res)
+            return jsonify({"ok": True, "status": "rejected", "resource": _resource_dto(res)})
 
     @app.post("/api/resources/batch-delete")
     def batch_delete_resources():
@@ -4354,24 +4465,30 @@ def _create_app() -> Flask:
             res = db.get(Resource, resource_id)
             if not res:
                 raise ApiError("NOT_FOUND", "resource not found", 404)
-            
-            # 检查是否已存在该行为
-            exists = db.execute(
-                select(UserBehavior)
-                .where(UserBehavior.user_id == user.id)
-                .where(UserBehavior.resource_id == resource_id)
-                .where(UserBehavior.action == action)
-            ).scalar_one_or_none()
-            
-            if not exists:
-                db.add(UserBehavior(user_id=user.id, resource_id=resource_id, action=action))
-                db.commit()
-                
-                # 如果是收藏操作，触发智能推送机制
-                if action == "favorite":
-                    _trigger_smart_push(db, user.id, neo4j_driver)
-            
-            return jsonify({"ok": True})
+
+            latest = (
+                db.execute(
+                    select(UserBehavior)
+                    .where(UserBehavior.user_id == user.id)
+                    .where(UserBehavior.resource_id == resource_id)
+                    .where(UserBehavior.action.in_(["favorite", "unfavorite"]))
+                    .order_by(UserBehavior.created_at.desc(), UserBehavior.id.desc())
+                )
+                .scalars()
+                .first()
+            )
+            latest_action = latest.action if latest else None
+
+            if latest_action == action:
+                return jsonify({"ok": True, "is_favorited": action == "favorite"})
+
+            db.add(UserBehavior(user_id=user.id, resource_id=resource_id, action=action))
+            db.commit()
+
+            if action == "favorite":
+                _trigger_smart_push(db, user.id, neo4j_driver)
+
+            return jsonify({"ok": True, "is_favorited": action == "favorite"})
 
     @app.post("/api/resources/<int:resource_id>/teachers")
     def set_resource_teachers(resource_id: int):
@@ -6525,9 +6642,9 @@ def _recommend(db: Session, user_id: int, neo4j_driver) -> List[Dict[str, Any]]:
         with neo4j_driver.session() as session:
             # 查找直接关联或前置/后继知识点
             query = """
-            MATCH (k1:KnowledgePoint)-[r:RELATED|PREREQUISITE*1..2]-(k2:KnowledgePoint)
+            MATCH p = (k1:KnowledgePoint)-[r:RELATED|PREREQUISITE*1..2]-(k2:KnowledgePoint)
             WHERE k1.name IN $interests AND k1.name <> k2.name
-            RETURN k2.name as name, type(r[0]) as rel_type, length(r) as dist
+            RETURN k2.name as name, type(relationships(p)[0]) as rel_type, length(p) as dist
             """
             rows = session.run(query, {"interests": list(user_interest_kps)}).data()
             for row in rows:

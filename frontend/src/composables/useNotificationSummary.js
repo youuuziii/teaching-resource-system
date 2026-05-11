@@ -1,9 +1,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import api from '../api/client'
 
-export function useNotificationSummary(authIdentity, isAuthed) {
+export function useNotificationSummary(authIdentity, isAuthed, roles) {
   const notificationCount = ref(0)
   const hasPendingResourceReview = ref(false)
+  const hasPendingDeleteRequest = ref(false)
   const notificationTimer = ref(null)
   const notificationFetchSeq = ref(0)
   const isPageVisible = ref(document.visibilityState === 'visible')
@@ -13,10 +14,15 @@ export function useNotificationSummary(authIdentity, isAuthed) {
   function resetNotificationState() {
     notificationCount.value = 0
     hasPendingResourceReview.value = false
+    hasPendingDeleteRequest.value = false
   }
 
   function isResourceReviewNotification(item) {
     return item?.type === 'audit_pending' || /资源待审核|批量资源待审核/.test(`${item?.title || ''}${item?.content || ''}`)
+  }
+
+  function isDeleteRequestNotification(item) {
+    return item?.type === 'delete_request' || /删除资源申请/.test(`${item?.title || ''}${item?.content || ''}`)
   }
 
   async function fetchNotificationSummary() {
@@ -32,6 +38,7 @@ export function useNotificationSummary(authIdentity, isAuthed) {
       const items = resp.data.items || []
       notificationCount.value = items.filter((n) => !n.is_read).length
       hasPendingResourceReview.value = items.some((n) => !n.is_read && isResourceReviewNotification(n))
+      hasPendingDeleteRequest.value = items.some((n) => !n.is_read && isDeleteRequestNotification(n))
     } catch {
       if (currentFetchSeq !== notificationFetchSeq.value) return
       resetNotificationState()
@@ -82,6 +89,7 @@ export function useNotificationSummary(authIdentity, isAuthed) {
   return {
     notificationCount,
     hasPendingResourceReview,
+    hasPendingDeleteRequest,
     resetNotificationState,
     startNotificationPolling,
     stopNotificationPolling,

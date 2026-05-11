@@ -5,14 +5,18 @@ import api from '../api/client'
 
 const loading = ref(false)
 const items = ref([])
+const deleteRequests = ref([])
 const selectedRows = ref([])
 const deleting = ref(false)
 const approvingSelected = ref(false)
+const deleteRequestLoading = ref(false)
 const statusCounts = ref({ pending: 0, rejected: 0, approved: 0 })
 const pagination = ref({ page: 1, pageSize: 10, total: 0 })
+const deleteRequestPagination = ref({ page: 1, pageSize: 10, total: 0 })
 
 const state = reactive({
   status: 'pending',
+  mode: 'resource',
 })
 
 const dialog = reactive({
@@ -35,6 +39,11 @@ const isSystemAdmin = computed(() => roles.value.includes('admin'))
 const isDean = computed(() => roles.value.includes('dean'))
 const canAudit = computed(() => isDean.value)
 const canBatchDelete = computed(() => isDean.value || isSystemAdmin.value)
+const canReviewDeleteRequests = computed(() => isDean.value || isSystemAdmin.value)
+const hasPendingResourceReview = computed(() => statusCounts.value.pending > 0)
+const hasPendingDeleteRequest = computed(() => deleteRequestPagination.value.total > 0)
+const resourceReviewCount = computed(() => statusCounts.value.pending + statusCounts.value.rejected + statusCounts.value.approved)
+const deleteRequestCount = computed(() => deleteRequestPagination.value.total)
 const pendingCount = computed(() => statusCounts.value.pending)
 const rejectedCount = computed(() => statusCounts.value.rejected)
 const approvedCount = computed(() => statusCounts.value.approved)
@@ -74,9 +83,24 @@ function statusText(status) {
 function switchStatus(status) {
   if (state.status === status) return
   state.status = status
+  state.mode = 'resource'
   pagination.value.page = 1
   fetchList()
 }
+
+function switchMode(mode) {
+  if (state.mode === mode) return
+  state.mode = mode
+  if (mode === 'delete_request') {
+    fetchDeleteRequests()
+  } else {
+    fetchList()
+  }
+}
+
+const resourceTabCount = computed(() => {
+  return state.status === 'pending' ? pendingCount.value : state.status === 'rejected' ? rejectedCount.value : approvedCount.value
+})
 
 if (isSystemAdmin.value && state.status === 'pending') state.status = 'rejected'
 
@@ -97,6 +121,23 @@ async function fetchList() {
     ElMessage.error(e?.response?.data?.error?.message || '加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function fetchDeleteRequests() {
+  deleteRequestLoading.value = true
+  try {
+    const resp = await api.get('/api/admin/delete-requests', {
+      params: { page: deleteRequestPagination.value.page, page_size: deleteRequestPagination.value.pageSize },
+    })
+    deleteRequests.value = resp.data.items || []
+    deleteRequestPagination.value.total = resp.data.total ?? deleteRequests.value.length
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '加载删除申请失败')
+    deleteRequests.value = []
+    deleteRequestPagination.value.total = 0
+  } finally {
+    deleteRequestLoading.value = false
   }
 }
 
@@ -213,25 +254,58 @@ async function submitAudit() {
   }
 }
 
-onMounted(fetchList)
+async function approveDeleteRequest(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认通过删除申请并删除资源《${row.resource_title || row.title}》吗？此操作会同步删除资源、文件和图谱节点，且不可恢复。`,
+      '通过删除申请',
+      { type: 'warning', confirmButtonText: '确定通过', cancelButtonText: '取消' },
+    )
+    await api.post(`/api/admin/delete-requests/${row.resource_id || row.id}/approve`)
+    ElMessage.success('已通过删除申请')
+    await fetchDeleteRequests()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(e?.response?.data?.error?.message || '操作失败')
+  }
+}
+
+async function rejectDeleteRequest(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认拒绝删除申请《${row.resource_title || row.title}》吗？`,
+      '拒绝删除申请',
+      { type: 'warning', confirmButtonText: '确定拒绝', cancelButtonText: '取消' },
+    )
+    await api.post(`/api/admin/delete-requests/${row.resource_id || row.id}/reject`)
+    ElMessage.success('已拒绝删除申请')
+    await fetchDeleteRequests()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(e?.response?.data?.error?.message || '操作失败')
+  }
+}
+
+onMounted(() => {
+  fetchList()
+  fetchDeleteRequests()
+})
 </script>
 
 <template>
   <div class="page-view audit-page">
     <el-card class="main-card audit-shell audit-fixed" shadow="hover">
       <template #header>
-        <div class="page-toolbar audit-toolbar">
-          <div class="page-toolbar__title title-section">
+        <div class="page-toolbar audit-toolbar audit-tabs-header">
+          <div class="page-toolbar__title title-section audit-title-block">
             <el-icon :size="22" class="title-icon"><Warning /></el-icon>
             <div class="title-block">
               <span class="title">资源审核</span>
-              <span class="title-hint">按状态筛选资源，支持批量处理和一键通过</span>
+              <span class="title-hint">支持资源审核与删除申请审核，删除申请只在删除申请页显示</span>
             </div>
           </div>
           <div class="toolbar-actions audit-actions">
             <el-tag v-if="!canAudit && !isSystemAdmin" type="warning">无审核权限</el-tag>
             <div class="audit-actions__fixed">
-              <div class="status-switcher">
+              <div v-if="state.mode === 'resource'" class="status-switcher">
                 <el-button-group>
                   <el-button
                     v-for="tab in statusTabs"
@@ -245,18 +319,30 @@ onMounted(fetchList)
                 </el-button-group>
               </div>
               <div class="audit-actions__primary">
-                <el-button type="primary" :loading="loading" @click="fetchList">刷新</el-button>
+                <el-button type="primary" :loading="state.mode === 'resource' ? loading : deleteRequestLoading" @click="state.mode === 'resource' ? fetchList() : fetchDeleteRequests()">刷新</el-button>
               </div>
             </div>
-            <el-button v-if="isDean && state.status === 'pending'" type="success" :loading="approvingSelected" :disabled="selectedRows.length === 0" @click="batchApproveSelected">
+            <el-button v-if="isDean && state.status === 'pending' && state.mode === 'resource'" type="success" :loading="approvingSelected" :disabled="selectedRows.length === 0" @click="batchApproveSelected">
               批量通过
             </el-button>
-            <el-button v-if="canBatchDelete" type="danger" :disabled="(selectedRows || []).length === 0" :loading="deleting" @click="batchDelete">批量删除</el-button>
+            <el-button v-if="state.mode === 'resource' && canBatchDelete" type="danger" :disabled="(selectedRows || []).length === 0" :loading="deleting" @click="batchDelete">批量删除</el-button>
+          </div>
+        </div>
+        <div class="audit-tabs-nav-wrap">
+          <div class="audit-tabs-nav">
+            <div class="audit-view-tab" :class="{ active: state.mode === 'resource' }" @click="switchMode('resource')">
+              <el-icon><FolderOpened /></el-icon>
+              <span>资源审核（{{ resourceTabCount }}）</span>
+            </div>
+            <div class="audit-view-tab" :class="{ active: state.mode === 'delete_request' }" @click="switchMode('delete_request')">
+              <el-icon><Delete /></el-icon>
+              <span>删除申请（{{ deleteRequestCount }}）</span>
+            </div>
           </div>
         </div>
       </template>
 
-      <el-table :data="items" v-loading="loading" style="width: 100%" @selection-change="onSelectionChange">
+      <el-table v-if="state.mode === 'resource'" :data="items" v-loading="loading" style="width: 100%" @selection-change="onSelectionChange">
         <el-table-column v-if="canBatchDelete" type="selection" width="44" />
         <el-table-column prop="title" label="标题" min-width="240">
           <template #default="{ row }">
@@ -319,7 +405,50 @@ onMounted(fetchList)
         </el-table-column>
       </el-table>
 
-      <div class="table-pagination">
+      <div v-else class="delete-request-panel">
+        <el-table :data="deleteRequests" v-loading="deleteRequestLoading" style="width: 100%">
+          <el-table-column label="申请标识" width="160">
+            <template #default>
+              <el-tag type="danger" effect="dark">删除申请</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="resource_title" label="资源标题" min-width="220" />
+          <el-table-column prop="resource_course" label="所属课程" min-width="180" />
+          <el-table-column prop="content" label="申请说明" min-width="320">
+            <template #default="{ row }">
+              <div class="delete-request-text">{{ row.content }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="140">
+            <template #default>
+              <el-tag type="warning" effect="dark">待审核</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="180" fixed="right">
+            <template #default="{ row }">
+              <div class="audit-row-actions">
+                <el-button size="small" type="success" @click="approveDeleteRequest(row)">通过</el-button>
+                <el-button size="small" type="danger" @click="rejectDeleteRequest(row)">拒绝</el-button>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="table-pagination">
+          <el-pagination
+            v-model:current-page="deleteRequestPagination.page"
+            v-model:page-size="deleteRequestPagination.pageSize"
+            :total="deleteRequestPagination.total"
+            :page-sizes="[10, 20, 50]"
+            layout="共, sizes, prev, pager, next, jumper"
+            background
+            @current-change="(page) => { deleteRequestPagination.page = page; fetchDeleteRequests() }"
+            @size-change="(size) => { deleteRequestPagination.pageSize = size; deleteRequestPagination.page = 1; fetchDeleteRequests() }"
+          />
+        </div>
+      </div>
+
+      <div v-if="state.mode === 'resource'" class="table-pagination">
         <el-pagination
           v-model:current-page="pagination.page"
           v-model:page-size="pagination.pageSize"
@@ -357,6 +486,62 @@ onMounted(fetchList)
 <style>
 .audit-actions {
   flex-wrap: nowrap;
+}
+
+.audit-tabs-header {
+  gap: 8px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.audit-title-block {
+  flex: 1 1 220px;
+}
+
+.audit-tabs-nav-wrap {
+  width: auto;
+}
+
+.audit-tabs-nav {
+  display: flex;
+  align-items: stretch;
+  min-width: max-content;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px 8px 0 0;
+  overflow: hidden;
+  background: #f5f7fa;
+}
+
+.audit-view-tab {
+  min-width: 118px;
+  padding: 8px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #909399;
+  border-right: 1px solid #dcdfe6;
+  transition: all 0.2s ease;
+  background: #f5f7fa;
+}
+
+.audit-view-tab:last-child {
+  border-right: none;
+}
+
+.audit-view-tab.active {
+  color: #409eff;
+  background: #fff;
+}
+
+.audit-view-tab:hover {
+  color: #409eff;
+}
+
+.audit-view-tab :deep(.el-icon) {
+  font-size: 16px;
 }
 
 .audit-actions__fixed {
@@ -410,5 +595,40 @@ onMounted(fetchList)
   display: flex;
   gap: 6px;
   flex-wrap: nowrap;
+}
+
+.mode-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: #f56c6c;
+  box-shadow: 0 0 0 3px rgba(245, 108, 108, 0.16);
+  vertical-align: middle;
+}
+
+.mode-dot--danger {
+  background: #f56c6c;
+}
+
+.delete-request-panel {
+  margin-top: 4px;
+}
+
+.delete-request-panel .table-pagination {
+  margin-top: 108px;
+  padding-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.delete-request-text {
+  color: #606266;
+  line-height: 1.6;
+}
+
+.delete-request-panel :deep(.el-table__body tr:hover > td) {
+  background-color: rgba(245, 108, 108, 0.06) !important;
 }
 </style>
