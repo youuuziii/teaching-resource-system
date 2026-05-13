@@ -47,12 +47,23 @@ function mergeGraph(partial) {
   const nextNodes = partial?.nodes || []
   const nextLinks = partial?.links || []
 
-  const nodeMap = new Map((graph.value.nodes || []).map((n) => [n.id, n]))
+  const normalizeNodeKey = (n) => {
+    if (n?.id) return `id:${n.id}`
+    const label = String(n?.label || '').trim()
+    const type = String(n?.type || '').trim()
+    return label || type ? `fallback:${type}:${label}` : ''
+  }
+
+  const nodeMap = new Map()
+  for (const n of graph.value.nodes || []) {
+    const key = normalizeNodeKey(n)
+    if (key) nodeMap.set(key, n)
+  }
   for (const n of nextNodes) {
-    if (!n?.id) continue
-    const prev = nodeMap.get(n.id)
-    if (!prev) nodeMap.set(n.id, n)
-    else nodeMap.set(n.id, { ...prev, ...n, label: n.label || prev.label })
+    const key = normalizeNodeKey(n)
+    if (!key) continue
+    const prev = nodeMap.get(key)
+    nodeMap.set(key, prev ? { ...prev, ...n, label: n.label || prev.label } : n)
   }
 
   const linkKey = (e) => `${e.source}__${e.target}__${e.type}`

@@ -109,7 +109,6 @@ async function fetchList() {
 
 function handlePageChange(page) {
   pagination.value.page = page
-  pagination.value.page = 1
   fetchList()
 }
 
@@ -224,56 +223,54 @@ onMounted(async () => {
       <div v-loading="loading" class="resource-grid">
         <el-empty v-if="items.length === 0" description="暂无符合条件的资源" />
 
-        <el-row :gutter="20">
-          <el-col v-for="item in items" :key="item.id" :xs="24" :sm="12" :md="8" :lg="5">
-            <el-tooltip :content="item.file_name || item.title" placement="top" :show-after="350" effect="dark">
-              <el-card class="resource-item-card" shadow="hover" @click="openDetail(item)">
-                <div class="resource-type-icon">
-                  <el-icon :size="32" color="#4564f5"><Notebook /></el-icon>
-                </div>
+        <div class="resource-card-grid">
+          <el-tooltip v-for="item in items" :key="item.id" :content="item.file_name || item.title" placement="top" :show-after="350" effect="dark">
+            <el-card class="resource-item-card" shadow="hover" @click="openDetail(item)">
+              <div class="resource-type-icon">
+                <el-icon :size="28" color="#4564f5"><Notebook /></el-icon>
+              </div>
 
-                <div class="resource-content">
-                  <h3 class="resource-title">{{ item.title }}</h3>
+              <div class="resource-content">
+                <h3 class="resource-title">{{ item.title }}</h3>
 
-                  <div class="resource-meta">
-                    <div class="meta-item">
-                      <el-icon><Reading /></el-icon>
-                      <span>{{ item.course || '通用课程' }}</span>
-                    </div>
-                    <div class="meta-item">
-                      <el-icon><User /></el-icon>
-                      <span>{{ (item.teachers || []).length ? item.teachers.map(t => t.name).join(' / ') : '上传教师未填写' }}</span>
-                    </div>
-                    <div class="meta-item knowledge-point-item">
-                      <el-icon><Notebook /></el-icon>
-                      <span>{{ Array.isArray(item.knowledge_points) && item.knowledge_points.length ? item.knowledge_points.map(k => k.name).join(' / ') : (item.knowledge_point || '所属知识点未填写') }}</span>
-                    </div>
+                <div class="resource-meta">
+                  <div class="meta-item">
+                    <el-icon><Reading /></el-icon>
+                    <span>{{ item.course || '通用课程' }}</span>
                   </div>
-
-                  <div class="resource-tags">
-                    <el-tag v-for="t in (item.tags || []).slice(0, 3)" :key="t" size="small" effect="plain">
-                      {{ t }}
-                    </el-tag>
+                  <div class="meta-item">
+                    <el-icon><User /></el-icon>
+                    <span>{{ (item.teachers || []).length ? item.teachers.map(t => t.name).join(' / ') : '上传教师未填写' }}</span>
                   </div>
-
-                  <div class="resource-footer">
-                    <span class="date">{{ new Date(item.created_at).toLocaleDateString() }}</span>
-                    <div class="actions" @click.stop>
-                      <el-tooltip content="收藏" placement="top">
-                        <el-button v-if="canFavorite" circle size="small" :type="item.is_favorited ? 'warning' : 'default'" @click="favorite(item)">
-                          <el-icon><StarFilled v-if="item.is_favorited" /><Star v-else /></el-icon>
-                        </el-button>
-                      </el-tooltip>
-                      <el-tooltip content="下载" placement="top">
-                        <el-button circle size="small" :icon="Download" @click="download(item)" />
-                      </el-tooltip>
-                    </div>
+                  <div class="meta-item knowledge-point-item">
+                    <el-icon><Notebook /></el-icon>
+                    <span>{{ Array.isArray(item.knowledge_points) && item.knowledge_points.length ? item.knowledge_points.map(k => k.name).join(' / ') : (item.knowledge_point || '所属知识点未填写') }}</span>
                   </div>
                 </div>
-              </el-card>
-            </el-tooltip>
-          </el-col>
-        </el-row>
+
+                <div class="resource-tags">
+                  <el-tag v-for="t in (item.tags || []).slice(0, 3)" :key="t" size="small" effect="plain">
+                    {{ t }}
+                  </el-tag>
+                </div>
+
+                <div class="resource-footer">
+                  <span class="date">{{ new Date(item.created_at).toLocaleDateString() }}</span>
+                  <div class="actions" @click.stop>
+                    <el-tooltip content="收藏" placement="top">
+                      <el-button v-if="canFavorite" circle size="small" :type="item.is_favorited ? 'warning' : 'default'" @click="favorite(item)">
+                        <el-icon><StarFilled v-if="item.is_favorited" /><Star v-else /></el-icon>
+                      </el-button>
+                    </el-tooltip>
+                    <el-tooltip content="下载" placement="top">
+                      <el-button circle size="small" :icon="Download" @click="download(item)" />
+                    </el-tooltip>
+                  </div>
+                </div>
+              </div>
+            </el-card>
+          </el-tooltip>
+        </div>
       </div>
 
       <div class="table-pagination resource-pagination">
@@ -332,12 +329,18 @@ onMounted(async () => {
   min-height: 400px;
 }
 
+.resource-card-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+}
+
 .resource-item-card {
   border-radius: 12px;
-  margin-bottom: 16px;
   transition: transform 0.3s;
   overflow: hidden;
   cursor: pointer;
+  min-height: 220px;
 }
 
 .resource-item-card:hover {
@@ -346,22 +349,22 @@ onMounted(async () => {
 
 .resource-type-icon {
   background: #f0f7ff;
-  height: 56px;
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: -14px -14px 10px;
+  margin: -14px -14px 8px;
 }
 
 .resource-content {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .resource-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: #303133;
   overflow: hidden;
@@ -376,14 +379,14 @@ onMounted(async () => {
 .resource-meta {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .meta-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 5px;
+  font-size: 10px;
   color: #909399;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -402,14 +405,14 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  min-height: 20px;
-  max-height: 40px;
+  min-height: 18px;
+  max-height: 36px;
   overflow: hidden;
 }
 
 .resource-footer {
-  margin-top: 2px;
-  padding-top: 8px;
+  margin-top: 0;
+  padding-top: 6px;
   border-top: 1px solid #f0f2f5;
   display: flex;
   justify-content: space-between;
@@ -426,13 +429,35 @@ onMounted(async () => {
   gap: 8px;
 }
 
+@media (max-width: 1400px) {
+  .resource-card-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1100px) {
+  .resource-card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 768px) {
   .filter-grid {
     grid-template-columns: 1fr;
   }
 
+  .resource-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .resource-item-card {
     cursor: default;
+  }
+}
+
+@media (max-width: 520px) {
+  .resource-card-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

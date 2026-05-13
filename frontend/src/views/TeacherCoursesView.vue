@@ -64,7 +64,14 @@ const kpForm = ref({ id: null, name: '', chapter_id: null, section_id: null })
 
 const resourceStatus = ref('all')
 const loadingResources = ref(false)
+const managedResources = ref([])
+const managedResourcesTotal = ref(0)
+const managePage = ref(1)
+const managePageSize = ref(10)
 const resources = ref([])
+const manageFilters = ref({ chapter_id: null, section_id: null, status: 'all' })
+const manageChapters = ref([])
+const manageSections = ref([])
 
 const uploadSubmitting = ref(false)
 const uploadForm = ref({ title: '', description: '', chapter_id: null, section_id: null, knowledge_point_id: null, file: null })
@@ -78,6 +85,20 @@ const batchResultsMaxHeight = computed(() => {
   const rows = Math.max(batchResults.value.length, 1)
   return Math.min(64 + rows * 48, 360)
 })
+
+function managedTableCellStyle({ column }) {
+  if (['status', 'operation'].includes(column?.property)) {
+    return { textAlign: 'center' }
+  }
+  return { textAlign: 'left' }
+}
+
+function managedTableHeaderStyle({ column }) {
+  if (['status', 'operation'].includes(column?.property)) {
+    return { textAlign: 'center' }
+  }
+  return { textAlign: 'left' }
+}
 
 const catalogFile = ref(null)
 const catalogSubmitting = ref(false)
@@ -167,6 +188,14 @@ async function submitBatchUpload() {
     ElMessage.error('请先选择课程')
     return
   }
+  if (!isNumberValue(batchChapterId.value)) {
+    ElMessage.error('请先选择章节')
+    return
+  }
+  if (!isNumberValue(batchSectionId.value)) {
+    ElMessage.error('请先选择小节')
+    return
+  }
   if (batchFiles.value.length === 0) {
     ElMessage.warning('请选择要上传的文件')
     return
@@ -175,12 +204,8 @@ async function submitBatchUpload() {
   const fd = new FormData()
   batchFiles.value.forEach(f => fd.append('files', f))
   fd.append('course_id', String(courseId.value))
-  if (isNumberValue(batchChapterId.value)) {
-    fd.append('chapter_id', String(batchChapterId.value))
-  }
-  if (isNumberValue(batchSectionId.value)) {
-    fd.append('section_id', String(batchSectionId.value))
-  }
+  fd.append('chapter_id', String(batchChapterId.value))
+  fd.append('section_id', String(batchSectionId.value))
 
   batchSubmitting.value = true
   try {
@@ -540,6 +565,72 @@ async function fetchMyResources() {
   }
 }
 
+async function fetchManagedResources() {
+  if (!isNumberValue(courseId.value)) {
+    managedResources.value = []
+    managedResourcesTotal.value = 0
+    manageChapters.value = []
+    manageSections.value = []
+    return
+  }
+  loadingResources.value = true
+  try {
+    if (manageChapters.value.length === 0) {
+      const chResp = await api.get('/api/chapters', { params: { course_id: courseId.value } })
+      manageChapters.value = chResp.data.items || []
+    }
+    const params = {
+      status: manageFilters.value.status || 'all',
+      course_id: courseId.value,
+      page: managePage.value,
+      page_size: managePageSize.value,
+    }
+    if (isNumberValue(manageFilters.value.chapter_id)) params.chapter_id = manageFilters.value.chapter_id
+    if (isNumberValue(manageFilters.value.section_id)) params.section_id = manageFilters.value.section_id
+    const resp = await api.get('/api/resources', { params })
+    managedResources.value = (resp.data.items || []).filter(r => Number(r.course_id) === Number(courseId.value))
+    managedResourcesTotal.value = Number(resp.data.total ?? managedResources.value.length)
+  } catch (e) {
+    managedResources.value = []
+    managedResourcesTotal.value = 0
+    ElMessage.error(e?.response?.data?.error?.message || '加载资源失败')
+  } finally {
+    loadingResources.value = false
+  }
+}
+
+async function handleManageChapterChange() {
+  manageFilters.value.section_id = null
+  manageSections.value = []
+  if (isNumberValue(manageFilters.value.chapter_id)) {
+    try {
+      const resp = await api.get('/api/sections', { params: { chapter_id: manageFilters.value.chapter_id } })
+      manageSections.value = resp.data.items || []
+    } catch {
+      manageSections.value = []
+    }
+  }
+}
+
+function resetManageFilters() {
+  manageFilters.value = { chapter_id: null, section_id: null, status: 'all' }
+  manageChapters.value = []
+  manageSections.value = []
+  managePage.value = 1
+  fetchManagedResources()
+}
+
+function handleManagePageChange(page) {
+  managePage.value = page
+  fetchManagedResources()
+}
+
+function handleManagePageSizeChange(size) {
+  managePageSize.value = size
+  managePage.value = 1
+  fetchManagedResources()
+}
+
 function onFileChange(ev) {
   const f = ev?.target?.files?.[0]
   uploadForm.value.file = f || null
@@ -554,6 +645,14 @@ async function submitUpload() {
     ElMessage.error('请先选择课程')
     return
   }
+  if (!isNumberValue(uploadForm.value.chapter_id)) {
+    ElMessage.error('请先选择章节')
+    return
+  }
+  if (!isNumberValue(uploadForm.value.section_id)) {
+    ElMessage.error('请先选择小节')
+    return
+  }
   if (!uploadForm.value.file) {
     ElMessage.warning('请选择要上传的文件')
     return
@@ -563,12 +662,8 @@ async function submitUpload() {
   fd.append('title', (uploadForm.value.title || '').trim() || uploadForm.value.file.name)
   if ((uploadForm.value.description || '').trim()) fd.append('description', uploadForm.value.description.trim())
   fd.append('course_id', String(courseId.value))
-  if (isNumberValue(uploadForm.value.chapter_id)) {
-    fd.append('chapter_id', String(uploadForm.value.chapter_id))
-  }
-  if (isNumberValue(uploadForm.value.section_id)) {
-    fd.append('section_id', String(uploadForm.value.section_id))
-  }
+  fd.append('chapter_id', String(uploadForm.value.chapter_id))
+  fd.append('section_id', String(uploadForm.value.section_id))
   if (isNumberValue(uploadForm.value.knowledge_point_id)) {
     fd.append('knowledge_point_id', String(uploadForm.value.knowledge_point_id))
   }
@@ -723,7 +818,10 @@ watch(courseId, async () => {
   batchSectionId.value = null
   kpForm.value.chapter_id = null
   kpForm.value.section_id = null
-  await Promise.all([fetchChapters(), fetchSectionsForKp(), fetchKnowledgePoints(), fetchMyResources()])
+  manageFilters.value = { chapter_id: null, section_id: null, status: 'all' }
+  manageChapters.value = []
+  manageSections.value = []
+  await Promise.all([fetchChapters(), fetchSectionsForKp(), fetchKnowledgePoints(), fetchMyResources(), fetchManagedResources()])
 })
 
 watch(chapterId, async () => {
@@ -752,7 +850,7 @@ watch(resourceStatus, fetchMyResources)
 
 onMounted(async () => {
   await fetchCourses()
-  await Promise.all([fetchChapters(), fetchSectionsForKp(), fetchKnowledgePoints(), fetchMyResources()])
+  await Promise.all([fetchChapters(), fetchSectionsForKp(), fetchKnowledgePoints(), fetchMyResources(), fetchManagedResources()])
 })
 </script>
 
@@ -940,7 +1038,7 @@ onMounted(async () => {
           <el-tab-pane>
             <template #label>
               <div class="tab-label">
-                <el-icon><Files /></el-icon>资源管理
+                <el-icon><Files /></el-icon>资源上传
               </div>
             </template>
 
@@ -967,22 +1065,22 @@ onMounted(async () => {
                     </el-row>
                     <el-row :gutter="20">
                       <el-col :span="8">
-                        <el-form-item label="关联章节（可选）">
-                          <el-select v-model="uploadForm.chapter_id" filterable clearable placeholder="不选则关联课程" style="width: 100%">
+                        <el-form-item label="关联章节">
+                          <el-select v-model="uploadForm.chapter_id" filterable placeholder="请选择章节" style="width: 100%">
                             <el-option v-for="ch in chapters" :key="ch.id" :label="ch.name" :value="ch.id" />
                           </el-select>
                         </el-form-item>
                       </el-col>
                       <el-col :span="8">
-                        <el-form-item label="关联小节（可选）">
-                          <el-select v-model="uploadForm.section_id" filterable clearable placeholder="请先选择章节" style="width: 100%" :loading="loadingUploadSections" :disabled="!uploadForm.chapter_id">
+                        <el-form-item label="关联小节">
+                          <el-select v-model="uploadForm.section_id" filterable placeholder="请先选择章节" style="width: 100%" :loading="loadingUploadSections" :disabled="!uploadForm.chapter_id">
                             <el-option v-for="s in uploadSections" :key="s.id" :label="s.name" :value="s.id" />
                           </el-select>
                         </el-form-item>
                       </el-col>
                       <el-col :span="8">
                         <el-form-item label="关联知识点（可选）">
-                          <el-select v-model="uploadForm.knowledge_point_id" filterable clearable placeholder="根据上方选择自动筛选" style="width: 100%">
+                          <el-select v-model="uploadForm.knowledge_point_id" filterable clearable placeholder="根据章节/小节自动筛选" style="width: 100%" :disabled="!uploadForm.section_id">
                             <el-option v-for="k in uploadKpOptions" :key="k.id" :label="k.name" :value="k.id" />
                           </el-select>
                         </el-form-item>
@@ -1010,24 +1108,18 @@ onMounted(async () => {
                     <span>批量上传资源</span>
                   </div>
 
-                  <el-alert type="info" :closable="false" show-icon>
-                    <template #title>
-                      您可以选择将资源关联到特定章节或小节。若不选择，资源将直接关联到课程。
-                    </template>
-                  </el-alert>
-
                   <el-form label-position="top" style="margin-top: 20px">
                     <el-row :gutter="20">
                       <el-col :span="12">
-                        <el-form-item label="选择章节（可选）">
-                          <el-select v-model="batchChapterId" filterable clearable placeholder="不选则关联课程" style="width: 100%">
+                        <el-form-item label="选择章节">
+                          <el-select v-model="batchChapterId" filterable placeholder="请选择章节" style="width: 100%">
                             <el-option v-for="ch in chapters" :key="ch.id" :label="ch.name" :value="ch.id" />
                           </el-select>
                         </el-form-item>
                       </el-col>
                       <el-col :span="12">
-                        <el-form-item label="选择小节（可选）">
-                          <el-select v-model="batchSectionId" filterable clearable placeholder="不选则关联章节" style="width: 100%">
+                        <el-form-item label="选择小节">
+                          <el-select v-model="batchSectionId" filterable placeholder="请先选择章节" style="width: 100%" :disabled="!batchChapterId">
                             <el-option v-for="s in batchSections" :key="s.id" :label="s.name" :value="s.id" />
                           </el-select>
                         </el-form-item>
@@ -1119,73 +1211,85 @@ onMounted(async () => {
                   </div>
                 </div>
               </el-tab-pane>
+
             </el-tabs>
+          </el-tab-pane>
 
-            <el-divider />
-
-            <div class="tab-toolbar">
-              <span class="tab-title">已上传资源</span>
-              <div class="actions">
-                <el-select v-model="resourceStatus" style="width: 140px" size="small">
-                  <el-option label="全部状态" value="all" />
-                  <el-option label="待审核" value="pending" />
-                  <el-option label="已通过" value="approved" />
-                  <el-option label="已拒绝" value="rejected" />
-                </el-select>
-                <el-button size="small" :icon="Refresh" :loading="loadingResources" @click="fetchMyResources" />
+          <el-tab-pane>
+            <template #label>
+              <div class="tab-label">
+                <el-icon><Files /></el-icon>资源管理
               </div>
+            </template>
+
+            <div class="resource-management-toolbar">
+              <el-form :inline="true" class="resource-filter-form resource-filter-form--compact">
+                <el-form-item label="章节">
+                  <el-select v-model="manageFilters.chapter_id" filterable clearable placeholder="全部章节" style="width: 180px" @change="handleManageChapterChange">
+                    <el-option v-for="ch in manageChapters" :key="ch.id" :label="ch.name" :value="ch.id" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="小节">
+                  <el-select v-model="manageFilters.section_id" filterable clearable placeholder="全部小节" style="width: 180px" :disabled="!isNumberValue(manageFilters.chapter_id)">
+                    <el-option v-for="s in manageSections" :key="s.id" :label="s.name" :value="s.id" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="状态">
+                  <el-select v-model="manageFilters.status" clearable placeholder="全部状态" style="width: 140px">
+                    <el-option label="全部状态" value="all" />
+                    <el-option label="待审核" value="pending" />
+                    <el-option label="已通过" value="approved" />
+                    <el-option label="已拒绝" value="rejected" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item>
+                  <el-button type="primary" @click="fetchManagedResources">筛选</el-button>
+                  <el-button @click="resetManageFilters">重置</el-button>
+                </el-form-item>
+              </el-form>
             </div>
 
-            <el-table :data="resources" v-loading="loadingResources" border stripe style="width: 100%">
-              <el-table-column prop="title" label="资源标题" min-width="200">
+            <el-table :data="managedResources" v-loading="loadingResources" border stripe class="managed-table" style="width: 100%" :cell-style="managedTableCellStyle" :header-cell-style="managedTableHeaderStyle">
+              <el-table-column prop="title" label="资源标题" width="300" align="left">
                 <template #default="{ row }">
-                  <div class="res-cell">
-                    <el-icon><Files /></el-icon>
-                    <span>{{ row.title }}</span>
+                  <div class="res-cell compact-cell resource-title-cell">
+                    <el-tooltip :content="row.title" placement="top" :show-after="200" :disabled="!row.title || String(row.title).length <= 18">
+                      <router-link :to="`/resources/${row.id}`" class="resource-title-link">
+                        <el-icon class="resource-title-icon"><Files /></el-icon>
+                        <span class="resource-title-text">{{ row.title }}</span>
+                      </router-link>
+                    </el-tooltip>
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column prop="chapter" label="章节" width="120">
+              <el-table-column prop="chapter" label="章节" width="200" align="left">
                 <template #default="{ row }">
                   {{ row.chapter || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column prop="section" label="小节" width="120">
+              <el-table-column prop="section" label="小节" width="200" align="left">
                 <template #default="{ row }">
                   {{ row.section || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column label="知识点" width="160">
+              <el-table-column label="知识点" min-width="340" align="left">
                 <template #default="{ row }">
                   <template v-if="(row.knowledge_points || []).length > 0">
-                    <el-tag v-for="kp in row.knowledge_points" :key="kp.id" size="small" type="success" style="margin-right: 4px">
+                    <el-tag v-for="kp in row.knowledge_points" :key="kp.id" size="small" type="success" class="table-tag">
                       {{ kp.name }}
                     </el-tag>
                   </template>
                   <span v-else>{{ row.knowledge_point || '-' }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="智能建议" width="180">
-                <template #default="{ row }">
-                  <div v-if="row.suggestion" class="suggestion-box">
-                    <el-tooltip :content="row.suggestion.reason" placement="top">
-                      <el-tag type="warning" size="small" class="suggestion-tag">
-                        <el-icon><Warning /></el-icon>
-                        建议移动到: {{ row.suggestion.target_name }}
-                      </el-tag>
-                    </el-tooltip>
-                  </div>
-                  <span v-else>-</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="110" align="center">
+              <el-table-column label="状态" width="110" align="center" prop="status">
                 <template #default="{ row }">
                   <el-tag :type="getStatusType(row.status)" size="small">
                     {{ getStatusLabel(row.status) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="180" fixed="right" align="center">
+              <el-table-column label="操作" width="180" fixed="right" align="center" prop="operation">
                 <template #default="{ row }">
                   <el-button-group>
                     <el-button size="small" :icon="Download" @click="download(row)" title="下载"></el-button>
@@ -1210,6 +1314,20 @@ onMounted(async () => {
                 </template>
               </el-table-column>
             </el-table>
+
+            <div class="manage-pagination-wrap">
+              <el-pagination
+                v-model:current-page="managePage"
+                v-model:page-size="managePageSize"
+                :page-sizes="[10, 20, 50]"
+                :total="managedResourcesTotal"
+                layout="total, sizes, prev, pager, next, jumper"
+                background
+                small
+                @current-change="handleManagePageChange"
+                @size-change="handleManagePageSizeChange"
+              />
+            </div>
           </el-tab-pane>
         </el-tabs>
       </el-col>
@@ -1546,7 +1664,11 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 50px;
+}
+
+.tab-toolbar--compact {
+  margin-bottom: 50px;
 }
 
 .tab-title {
@@ -1564,8 +1686,83 @@ onMounted(async () => {
 .kp-cell, .res-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   color: #606266;
+}
+
+.resource-title-cell {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  width: 100%;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.resource-title-icon {
+  flex-shrink: 0;
+}
+
+.resource-title-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #303133;
+  font-weight: 700;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.resource-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-title-link:hover {
+  color: #409eff;
+  text-decoration: underline;
+}
+
+.compact-cell {
+  gap: 4px;
+}
+
+.managed-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.managed-table :deep(.cell) {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.table-tag {
+  margin-right: 4px;
+}
+
+.manage-pagination-wrap {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.resource-management-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  margin-top: -10px;
+}
+
+.resource-filter-form--compact {
+  margin-bottom: 0;
 }
 
 .upload-section {

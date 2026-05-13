@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
@@ -15,7 +15,9 @@ import {
   Check,
   Close,
   Timer,
-  Delete
+  Delete,
+  Plus,
+  Minus
 } from '@element-plus/icons-vue'
 import api from '../api/client'
 
@@ -44,8 +46,14 @@ const currentUserId = computed(() => storedUser.value?.id ?? null)
 const isTeacher = computed(() => roles.value.includes('teacher'))
 const canFavorite = computed(() => isAuthed.value && roles.value.includes('student'))
 const isOwnerTeacher = computed(() => isTeacher.value && resource.value && Number(resource.value.created_by) === Number(currentUserId.value))
+const canEditMetadata = computed(() => isOwnerTeacher.value)
 const canDeleteResource = computed(() => isOwnerTeacher.value && !resource.value?.delete_request_status)
 const hasPendingDeleteRequest = computed(() => resource.value?.delete_request_status === 'pending')
+
+const editing = ref(false)
+const editForm = reactive({ description: '', tags: [] })
+const newTag = ref('')
+const tagDialogOpen = ref(false)
 
 async function fetchDetail() {
   loading.value = true
@@ -54,6 +62,8 @@ async function fetchDetail() {
     resource.value = resp.data.resource
     createdByUser.value = resp.data.created_by_user
     auditedByUser.value = resp.data.audited_by_user
+    editForm.description = resp.data.resource?.description || ''
+    editForm.tags = Array.isArray(resp.data.resource?.tags) ? [...resp.data.resource.tags] : []
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '加载失败')
   } finally {
@@ -63,6 +73,101 @@ async function fetchDetail() {
 
 function goBack() {
   router.back()
+}
+
+function openTagDialog() {
+  if (!resource.value) return
+  editForm.description = resource.value.description || ''
+  editForm.tags = Array.isArray(resource.value.tags) ? [...resource.value.tags] : []
+  newTag.value = ''
+  tagDialogOpen.value = true
+}
+
+function addTag() {
+  const tag = String(newTag.value || '').trim()
+  if (!tag) return
+  if (!editForm.tags.includes(tag)) editForm.tags.push(tag)
+  newTag.value = ''
+}
+
+function clearTags() {
+  editForm.tags = []
+}
+
+async function removeTag(tag) {
+  try {
+    await ElMessageBox.confirm(`确定删除标签「${tag}」吗？`, '删除标签', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    return
+  }
+  editForm.tags = editForm.tags.filter(t => t !== tag)
+}
+
+async function saveMetadata() {
+  if (!resource.value) return
+  editing.value = true
+  try {
+    const resp = await api.patch(`/api/resources/${resource.value.id}`, {
+      description: editForm.description,
+    })
+    resource.value = resp.data.resource || resource.value
+    ElMessage.success('描述已更新')
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '保存失败')
+  } finally {
+    editing.value = false
+  }
+}
+
+function openDescriptionEditor() {
+  if (!resource.value) return
+  editForm.description = resource.value.description || ''
+}
+
+async function saveDescription() {
+  if (!resource.value) return
+  editing.value = true
+  try {
+    const resp = await api.patch(`/api/resources/${resource.value.id}`, {
+      description: editForm.description,
+    })
+    resource.value = resp.data.resource || resource.value
+    ElMessage.success('描述已更新')
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '保存失败')
+  } finally {
+    editing.value = false
+  }
+}
+
+
+function buildTagsPayload() {
+  return [...new Set(editForm.tags.map(t => String(t || '').trim()).filter(Boolean))]
+}
+
+async function saveTags() {
+  if (!resource.value) return
+  editing.value = true
+  try {
+    const payload = buildTagsPayload()
+    const resp = await api.post(`/api/resources/${resource.value.id}/tags`, {
+      tags: payload,
+    })
+    const updated = resp.data.resource || resource.value
+    resource.value = updated
+    editForm.tags = Array.isArray(updated.tags) ? [...updated.tags] : payload
+    tagDialogOpen.value = false
+    ElMessage.success('标签已更新')
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '保存失败')
+  } finally {
+    editing.value = false
+  }
 }
 
 async function requestDelete() {
@@ -258,17 +363,36 @@ onMounted(fetchDetail)
                 </div>
                 
                 <div class="description-section">
-                  <h3 class="section-title">资源描述</h3>
+                  <div class="section-head-row">
+                    <h3 class="section-title">资源描述</h3>
+                  </div>
                   <p class="description-text">{{ resource.description || '暂无详细描述。' }}</p>
+                  <template v-if="canEditMetadata">
+                    <el-input
+                      v-model="editForm.description"
+                      type="textarea"
+                      :rows="4"
+                      placeholder="修改资源描述"
+                      class="teacher-edit-textarea"
+                    />
+                    <div class="inline-save-row">
+                      <el-button size="small" type="primary" :loading="editing" @click="saveDescription">保存描述</el-button>
+                    </div>
+                  </template>
                 </div>
 
                 <div class="tags-section">
-                  <h3 class="section-title">资源标签</h3>
+                  <div class="section-head-row section-head-row--space">
+                    <h3 class="section-title">资源标签</h3>
+                    <el-button v-if="canEditMetadata" size="small" type="success" plain :icon="Plus" @click="openTagDialog">编辑标签</el-button>
+                  </div>
                   <div class="tags-list">
-                    <el-tag v-for="t in resource.tags || []" :key="t" size="default" effect="plain" class="tag-item">
-                      {{ t }}
-                    </el-tag>
                     <span v-if="!resource.tags?.length" class="empty-text">无标签</span>
+                    <template v-else>
+                      <el-tag v-for="t in (resource.tags || [])" :key="t" size="default" effect="plain" class="tag-item">
+                        {{ t }}
+                      </el-tag>
+                    </template>
                   </div>
                 </div>
               </el-card>
@@ -377,6 +501,35 @@ onMounted(fetchDetail)
         </div>
       </template>
     </el-skeleton>
+
+    <el-dialog v-model="tagDialogOpen" title="编辑标签" width="520px">
+      <el-form label-position="top">
+        <el-form-item label="当前标签">
+          <div class="dialog-tag-list">
+            <el-tag v-for="t in editForm.tags" :key="t" closable @close="removeTag(t)" class="dialog-tag-item">
+              {{ t }}
+            </el-tag>
+            <span v-if="editForm.tags.length === 0" class="empty-text">暂无标签</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="新增标签">
+          <el-input
+            v-model="newTag"
+            placeholder="输入标签后点击添加"
+            @keyup.enter="addTag"
+          >
+            <template #append>
+              <el-button class="tag-add-confirm-btn" type="success" color="#67c23a" @click="addTag">添加</el-button>
+            </template>
+          </el-input>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="tagDialogOpen = false">取消</el-button>
+        <el-button type="primary" :loading="editing" @click="saveTags">保存标签</el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -430,13 +583,30 @@ onMounted(fetchDetail)
   font-size: 16px;
   font-weight: 600;
   color: #303133;
-  margin: 0 0 16px;
+  margin: 0;
   padding-left: 12px;
   border-left: 4px solid #409eff;
 }
 
+.section-head-row {
+  margin-bottom: 16px;
+}
+
+.section-head-row--space {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .description-section {
   margin-bottom: 40px;
+}
+
+.section-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
 }
 
 .description-text {
@@ -444,16 +614,68 @@ onMounted(fetchDetail)
   color: #606266;
   line-height: 1.8;
   white-space: pre-wrap;
+  margin-bottom: 12px;
+}
+
+.teacher-edit-textarea {
+  margin-bottom: 10px;
+}
+
+.inline-save-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
 }
 
 .tags-list {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  align-items: center;
 }
 
 .tag-item {
   border-radius: 6px;
+}
+
+.editable-tag {
+  position: relative;
+  padding-right: 24px;
+}
+
+.tag-remove-btn {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: none;
+  background: #f56c6c;
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.tag-input {
+  width: 160px;
+}
+
+.tag-add-confirm-btn {
+  background-color: #67c23a !important;
+  border-color: #67c23a !important;
+  color: #fff !important;
+}
+
+.dialog-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dialog-tag-item {
+  margin-right: 0;
 }
 
 .audit-card {
