@@ -27,6 +27,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     delete,
+    insert,
     MetaData,
     String,
     Text,
@@ -1118,7 +1119,7 @@ def _create_app() -> Flask:
         # --- 步骤 3: 自动实体识别与知识图谱构建 (NER & RE) ---
         # 1. 如果资源未关联知识点，尝试从文件名或内容中抽取关键词作为知识点
         file_base = Path(res.file_name).stem
-        if not res.knowledge_point_id:
+        if not res.knowledge_point_id and not res.knowledge_point_name:
             print(f"[*] Identifying entity for: {file_base}")
             # --- 阶段1: 预处理 (Preprocessing) ---
             # 1.1 仅剔除日期、版本、括号内容，保留核心文本以维持分词上下文
@@ -1274,16 +1275,47 @@ def _create_app() -> Flask:
                 except Exception: pass
 
             current_dir_name = ""
+            current_chapter_name = ""
+            current_section_name = ""
             if res.section_id:
                 sec = db.get(Section, res.section_id)
-                if sec: current_dir_name = sec.name
+                if sec:
+                    current_section_name = sec.name
+                    current_dir_name = sec.name
+                    if sec.chapter:
+                        current_chapter_name = sec.chapter.name
             elif res.chapter_id:
                 chap = db.get(Chapter, res.chapter_id)
-                if chap: current_dir_name = chap.name
+                if chap:
+                    current_chapter_name = chap.name
+                    current_dir_name = chap.name
+
+            def _compact_name(value: str) -> str:
+                value = (value or "").strip()
+                value = re.sub(r'^(第\s*[一二三四五六七八九十百千万0-9]+\s*章\s*)', '', value)
+                value = re.sub(r'^(第\s*[一二三四五六七八九十百千万0-9]+\s*节\s*)', '', value)
+                value = re.sub(r'^[\d一二三四五六七八九十百千万]+[\._、\-\s]*', '', value)
+                return re.sub(r'\s+', '', value)
+
+            chapter_name_key = _compact_name(current_chapter_name)
+            section_name_key = _compact_name(current_section_name)
 
             for entity in extracted_entities:
                 # 0. 实体归一化：优先使用本地词库的映射关系 (解决 IR -> 指令寄存器等简称问题)
                 target_kp_name = discipline_dict.get(entity, entity)
+                entity_key = _compact_name(target_kp_name)
+
+                # 0.1 如果提取结果与当前章节/小节一致，则直接挂载到目录，不创建同名知识点
+                if current_section_name and entity_key and entity_key == section_name_key:
+                    print(f"[*] Entity '{entity}' matched current section '{current_section_name}', binding resource directly to section.")
+                    res.section_id = res.section_id or (res.section.id if res.section else None)
+                    continue
+                if current_chapter_name and entity_key and entity_key == chapter_name_key:
+                    print(f"[*] Entity '{entity}' matched current chapter '{current_chapter_name}', binding resource directly to chapter.")
+                    res.chapter_id = res.chapter_id or (res.chapter.id if res.chapter else None)
+                    res.section_id = None
+                    continue
+
                 existing_kp = None
                 
                 # 1. 本地匹配：优先查找已有知识点 (使用归一化后的名称)
@@ -1329,11 +1361,31 @@ def _create_app() -> Flask:
                 # 4. 关联或创建
                 try:
                     if not existing_kp:
+                        bind_chapter_id = res.chapter_id
+                        bind_section_id = res.section_id
+                        matched_direct_dir = False
+                        if current_section_name and entity_key and entity_key == section_name_key:
+                            matched_direct_dir = True
+                            bind_chapter_id = res.section.chapter_id if res.section and res.section.chapter_id else res.chapter_id
+                            bind_section_id = res.section_id
+                        elif current_chapter_name and entity_key and entity_key == chapter_name_key:
+                            matched_direct_dir = True
+                            bind_section_id = None
+                            bind_chapter_id = res.chapter_id
+
+                        if matched_direct_dir:
+                            if bind_chapter_id:
+                                res.chapter_id = bind_chapter_id
+                            if bind_section_id is not None:
+                                res.section_id = bind_section_id
+                            print(f"[*] Skip creating KP '{target_kp_name}' because it matches the current directory; resource will bind to directory directly.")
+                            continue
+
                         new_kp = KnowledgePoint(
-                            name=target_kp_name, 
+                            name=target_kp_name,
                             course_id=res.course_id,
-                            chapter_id=res.chapter_id,
-                            section_id=res.section_id
+                            chapter_id=bind_chapter_id,
+                            section_id=bind_section_id
                         )
                         db.add(new_kp)
                         db.flush()
@@ -2531,6 +2583,13 @@ def _create_app() -> Flask:
                 }
             )
 
+    def _compact_dir_name(value: Optional[str]) -> str:
+        text = (value or "").strip()
+        text = re.sub(r'^(第\s*[一二三四五六七八九十百千万0-9]+\s*章\s*)', '', text)
+        text = re.sub(r'^(第\s*[一二三四五六七八九十百千万0-9]+\s*节\s*)', '', text)
+        text = re.sub(r'^[\d一二三四五六七八九十百千万]+[\._、\-\s]*', '', text)
+        return re.sub(r'\s+', '', text)
+
     @app.post("/api/courses/<int:course_id>/cleanup")
     def cleanup_course_resources(course_id: int):
         with SessionLocal() as db:
@@ -2609,6 +2668,82 @@ def _create_app() -> Flask:
                     "resources": deleted_resources,
                     "resource_files": removed_files,
                 }
+            })
+
+    @app.post("/api/courses/<int:course_id>/repair-duplicates")
+    def repair_course_duplicates(course_id: int):
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"dean", "admin"})
+            c = db.get(Course, course_id)
+            if not c:
+                raise ApiError("NOT_FOUND", "course not found", 404)
+
+            chapters = db.execute(select(Chapter).where(Chapter.course_id == c.id)).scalars().all()
+            sections = db.execute(select(Section).join(Chapter, Section.chapter_id == Chapter.id).where(Chapter.course_id == c.id)).scalars().all()
+            kps = db.execute(select(KnowledgePoint).where(KnowledgePoint.course_id == c.id)).scalars().all()
+            resources = db.execute(select(Resource).where((Resource.course_id == c.id) | (Resource.course_name == c.name))).scalars().all()
+
+            chapter_by_key = {_compact_dir_name(ch.name): ch for ch in chapters if _compact_dir_name(ch.name)}
+            section_by_key = {_compact_dir_name(sec.name): sec for sec in sections if _compact_dir_name(sec.name)}
+
+            merged = 0
+            relinked = 0
+            cleared = 0
+
+            for kp in kps:
+                kp_key = _compact_dir_name(kp.name)
+                target_chapter = chapter_by_key.get(kp_key)
+                target_section = section_by_key.get(kp_key)
+                if not target_chapter and not target_section:
+                    continue
+                if target_section:
+                    if kp.section_id == target_section.id and kp.chapter_id == target_section.chapter_id:
+                        continue
+                    kp.chapter_id = target_section.chapter_id
+                    kp.section_id = target_section.id
+                else:
+                    if kp.chapter_id == target_chapter.id and kp.section_id is None:
+                        continue
+                    kp.chapter_id = target_chapter.id
+                    kp.section_id = None
+
+                duplicate_resources = db.execute(
+                    select(Resource).where(
+                        (Resource.knowledge_point_id == kp.id) |
+                        (Resource.knowledge_point_name == kp.name) |
+                        (Resource.knowledge_point_name.like(f"%{kp.name}%"))
+                    )
+                ).scalars().all()
+                for res in duplicate_resources:
+                    if target_section:
+                        res.chapter_id = target_section.chapter_id
+                        res.section_id = target_section.id
+                    else:
+                        res.chapter_id = target_chapter.id
+                        res.section_id = None
+                    if res.knowledge_point_id == kp.id and (target_section or target_chapter):
+                        res.knowledge_point_id = kp.id
+                    if res.knowledge_point_name == kp.name:
+                        res.knowledge_point_name = target_section.name if target_section else target_chapter.name
+                    relinked += 1
+
+                if kp.name == (target_section.name if target_section else target_chapter.name):
+                    cleared += 1
+
+            db.commit()
+
+            return jsonify({
+                "ok": True,
+                "repaired": {
+                    "knowledge_points": len(kps),
+                    "chapters": len(chapters),
+                    "sections": len(sections),
+                    "resources": len(resources),
+                    "relinked_resources": relinked,
+                    "cleared_duplicates": cleared,
+                    "merged": merged,
+                },
             })
 
     @app.get("/api/courses/<int:course_id>/teachers")
@@ -3459,6 +3594,8 @@ def _create_app() -> Flask:
     def me_resources():
         status = (request.args.get("status") or "").strip().lower()
         course_id = _parse_int(request.args.get("course_id"))
+        chapter_id = _parse_int(request.args.get("chapter_id"))
+        section_id = _parse_int(request.args.get("section_id"))
         knowledge_point_id = _parse_int(request.args.get("knowledge_point_id"))
         with SessionLocal() as db:
             user = require_auth(db)
@@ -3470,6 +3607,10 @@ def _create_app() -> Flask:
                 q = q.where(Resource.status == status)
             if course_id is not None:
                 q = q.where(Resource.course_id == course_id)
+            if chapter_id is not None:
+                q = q.where(Resource.chapter_id == chapter_id)
+            if section_id is not None:
+                q = q.where(Resource.section_id == section_id)
             if knowledge_point_id is not None:
                 q = q.where(Resource.knowledge_point_id == knowledge_point_id)
             rows = db.execute(q).scalars().all()
@@ -3496,6 +3637,8 @@ def _create_app() -> Flask:
                 raise ApiError("BAD_REQUEST", "title is required", 400)
             if course_id is None:
                 raise ApiError("BAD_REQUEST", "course_id is required", 400)
+            if not chapter_id or not section_id:
+                raise ApiError("BAD_REQUEST", "必须同时选择章节和小节，资源只能上传到小节层", 400)
 
             original_name = (f.filename or "upload").strip()
             suffix = Path(original_name).suffix.lower()
@@ -3593,7 +3736,7 @@ def _create_app() -> Flask:
 
             db.commit()
             db.refresh(res)
-            return jsonify({"resource": _resource_dto(res)})
+            return jsonify({"resource": _resource_dto(res, db)})
 
     @app.post("/api/resources/batch-approve-all")
     def batch_approve_all_resources():
@@ -3671,6 +3814,8 @@ def _create_app() -> Flask:
                     chapter_obj = db.get(Chapter, chapter_id)
                     if not chapter_obj or chapter_obj.course_id != course_id:
                         raise ApiError("NOT_FOUND", "chapter not found or does not belong to this course", 404)
+                if not chapter_obj or not section_obj:
+                    raise ApiError("BAD_REQUEST", "必须同时选择章节和小节，资源只能上传到小节层", 400)
 
                 trow = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
                 if not trow:
@@ -3957,6 +4102,8 @@ def _create_app() -> Flask:
         keyword = (request.args.get("keyword") or "").strip()
         tag = (request.args.get("tag") or "").strip()
         course_id = _parse_int(request.args.get("course_id"))
+        chapter_id = _parse_int(request.args.get("chapter_id"))
+        section_id = _parse_int(request.args.get("section_id"))
         knowledge_point_id = _parse_int(request.args.get("knowledge_point_id"))
         teacher_id = _parse_int(request.args.get("teacher_id"))
         page = max(1, _parse_int(request.args.get("page")) or 1)
@@ -3999,6 +4146,10 @@ def _create_app() -> Flask:
                     q = q.where((Resource.title.like(like)) | (Resource.description.like(like)))
                 if course_id is not None:
                     q = q.where(Resource.course_id == course_id)
+                if chapter_id is not None:
+                    q = q.where(Resource.chapter_id == chapter_id)
+                if section_id is not None:
+                    q = q.where(Resource.section_id == section_id)
                 if knowledge_point_id is not None:
                     q = q.where(Resource.knowledge_point_id == knowledge_point_id)
                 if teacher_id is not None:
@@ -4012,6 +4163,8 @@ def _create_app() -> Flask:
             q = _build_query(status)
             total = db.execute(select(func.count()).select_from(q.subquery())).scalar_one() or 0
             resources = db.execute(q.order_by(Resource.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
+            if course_id is not None:
+                resources = [r for r in resources if r.course_id == course_id]
 
             status_counts = None
             if current:
@@ -4128,6 +4281,52 @@ def _create_app() -> Flask:
 
             p = Path(res.file_path)
             return send_from_directory(p.parent, p.name, as_attachment=True, download_name=res.file_name)
+
+    @app.patch("/api/resources/<int:resource_id>")
+    def update_resource_metadata(resource_id: int):
+        data = _json()
+        description = data.get("description")
+        tags = data.get("tags")
+        if description is None and tags is None:
+            raise ApiError("BAD_REQUEST", "description or tags required", 400)
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"teacher"})
+            res = db.get(Resource, resource_id)
+            if not res:
+                raise ApiError("NOT_FOUND", "resource not found", 404)
+            if res.created_by != user.id:
+                raise ApiError("FORBIDDEN", "cannot edit others' resources", 403)
+            print(f"[*] PATCH /api/resources/{resource_id}: description={description is not None}, tags={tags}")
+            if description is not None:
+                if not isinstance(description, str):
+                    raise ApiError("BAD_REQUEST", "description must be string", 400)
+                res.description = description.strip() or None
+            if tags is not None:
+                if not isinstance(tags, list):
+                    raise ApiError("BAD_REQUEST", "tags must be array", 400)
+                cleaned = []
+                seen = set()
+                for tag in tags:
+                    t = str(tag).strip()
+                    if not t or t in seen:
+                        continue
+                    seen.add(t)
+                    cleaned.append(t)
+                print(f"[*] Cleaning tags for resource {res.id}: {cleaned}")
+                deleted = db.query(ResourceTag).filter(ResourceTag.resource_id == res.id).delete(synchronize_session=False)
+                print(f"[*] Deleted {deleted} old tags for resource {res.id}")
+                db.flush()
+                if cleaned:
+                    db.execute(insert(ResourceTag), [{"resource_id": res.id, "tag": tag} for tag in cleaned])
+                    db.flush()
+                count = db.query(ResourceTag).filter(ResourceTag.resource_id == res.id).count()
+                print(f"[*] Resource {res.id} tag count before commit: {count}")
+            db.commit()
+            fresh = db.get(Resource, res.id)
+            after_count = db.query(ResourceTag).filter(ResourceTag.resource_id == res.id).count()
+            print(f"[*] Resource {res.id} tag count after commit: {after_count}")
+            return jsonify({"ok": True, "resource": _resource_dto(fresh or res, db)})
 
     @app.delete("/api/resources/<int:resource_id>")
     def delete_resource(resource_id: int):
@@ -4445,12 +4644,20 @@ def _create_app() -> Flask:
                 pass
             else:
                 raise ApiError("FORBIDDEN", "Insufficient role", 403)
-            res.tags.clear()
-            for t in normalized:
-                res.tags.append(ResourceTag(tag=t))
+            print(f"[*] POST /api/resources/{resource_id}/tags: {normalized}")
+            deleted = db.query(ResourceTag).filter(ResourceTag.resource_id == res.id).delete(synchronize_session=False)
+            print(f"[*] Deleted {deleted} existing tags for resource {res.id}")
+            db.flush()
+            if normalized:
+                db.execute(insert(ResourceTag), [{"resource_id": res.id, "tag": t} for t in normalized])
+                db.flush()
+            count = db.query(ResourceTag).filter(ResourceTag.resource_id == res.id).count()
+            print(f"[*] Resource {res.id} tag count before commit: {count}")
             db.commit()
-            db.refresh(res)
-            return jsonify({"resource": _resource_dto(res)})
+            fresh = db.get(Resource, res.id)
+            after_count = db.query(ResourceTag).filter(ResourceTag.resource_id == res.id).count()
+            print(f"[*] Resource {res.id} tag count after commit: {after_count}")
+            return jsonify({"resource": _resource_dto(fresh or res, db)})
 
     @app.post("/api/resources/<int:resource_id>/favorite")
     def favorite(resource_id: int):
@@ -5542,7 +5749,7 @@ def _user_dto(u: User) -> Dict[str, Any]:
     return data
 
 
-def _resource_dto(r: Resource) -> Dict[str, Any]:
+def _resource_dto(r: Resource, db: Optional[Session] = None) -> Dict[str, Any]:
     course_label = r.course.name if r.course else r.course_name
     chapter_label = r.chapter.name if r.chapter else r.chapter_name
     section_label = r.section.name if r.section else r.section_name
@@ -5561,6 +5768,13 @@ def _resource_dto(r: Resource) -> Dict[str, Any]:
     for rt in getattr(r, "resource_teachers", []) or []:
         if rt.teacher:
             teachers.append({"id": rt.teacher.teacher_id, "name": rt.teacher.name})
+
+    tags = [t.tag for t in r.tags]
+    if db is not None:
+        try:
+            tags = [row[0] for row in db.execute(select(ResourceTag.tag).where(ResourceTag.resource_id == r.id)).all()]
+        except Exception:
+            pass
     return {
         "id": r.id,
         "title": r.title,
@@ -5590,7 +5804,7 @@ def _resource_dto(r: Resource) -> Dict[str, Any]:
         "delete_request_audited_by": r.delete_request_audited_by,
         "delete_request_audited_at": r.delete_request_audited_at.isoformat() if r.delete_request_audited_at else None,
         "delete_request_audit_comment": r.delete_request_audit_comment,
-        "tags": [t.tag for t in r.tags],
+        "tags": tags,
         "suggestion": r.suggestion,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
@@ -6438,7 +6652,7 @@ def _mysql_explore(db: Session, node_type: str, raw: str, expand: str) -> Dict[s
         seen_links.add(key)
         links.append({"source": source, "target": target, "type": rel_type})
 
-    def add_resource(r: Resource, via_kp: Optional[str] = None, via_course: Optional[str] = None) -> None:
+    def add_resource(r: Resource, via_kp: Optional[str] = None, via_course: Optional[str] = None, via_chapter: Optional[Chapter] = None) -> None:
         if r.id not in resource_ids:
             resource_ids.append(r.id)
         upsert_node(f"res:{r.id}", r.title or str(r.id), "resource")
@@ -6449,6 +6663,11 @@ def _mysql_explore(db: Session, node_type: str, raw: str, expand: str) -> Dict[s
             kid = f"kp:{kp_label}"
             upsert_node(kid, kp_label, "knowledge_point")
             add_link(kid, f"res:{r.id}", "related_resource")
+        chapter_obj = via_chapter or r.chapter
+        if chapter_obj:
+            chid = f"chapter:{chapter_obj.id}"
+            upsert_node(chid, chapter_obj.name, "chapter")
+            add_link(chid, f"res:{r.id}", "has_resource")
         course_label = via_course
         if course_label is None:
             course_label = r.course.name if r.course else r.course_name
@@ -6483,6 +6702,15 @@ def _mysql_explore(db: Session, node_type: str, raw: str, expand: str) -> Dict[s
                 chid = f"chapter:{kp.chapter_id}"
                 upsert_node(chid, kp.chapter.name, "chapter")
                 add_link(chid, center_id, "has_kp")
+                # 若知识点与章节同名，章节应直接承载该资源，而不是生成独立知识点节点
+                if _compact := re.sub(r'\s+', '', raw):
+                    chapter_compact = re.sub(r'\s+', '', kp.chapter.name or "")
+                    if _compact == chapter_compact and not kp.section_id:
+                        q = select(Resource).where(Resource.status == "approved").order_by(Resource.created_at.desc())
+                        q = q.where((Resource.chapter_id == kp.chapter_id) | (Resource.knowledge_point_id == kp.id) | (Resource.knowledge_point_name == raw))
+                        for r in db.execute(q).scalars().all():
+                            add_resource(r, via_course=kp.course.name if kp.course else None)
+                        return {"nodes": list(nodes.values()), "links": links, "resource_ids": resource_ids, "paths": {}}
 
         q = select(Resource).where(Resource.status == "approved").order_by(Resource.created_at.desc())
         if kp:
@@ -6551,6 +6779,14 @@ def _mysql_explore(db: Session, node_type: str, raw: str, expand: str) -> Dict[s
             sid = f"section:{s.id}"
             upsert_node(sid, s.name, "section")
             add_link(center_id, sid, "has_section")
+        chapter_query = select(Resource).where(Resource.status == "approved")
+        chapter_query = chapter_query.where((Resource.chapter_id == ch.id) | (Resource.course_id == ch.course_id))
+        if ch.course and ch.course.name:
+            chapter_query = chapter_query.where((Resource.course_name == ch.course.name) | (Resource.chapter_id == ch.id) | (Resource.course_id == ch.course_id))
+        chapter_resources = db.execute(chapter_query.order_by(Resource.created_at.desc())).scalars().all()
+        for r in chapter_resources:
+            add_resource(r, via_course=ch.course.name if ch.course else None, via_chapter=ch)
+            add_link(center_id, f"res:{r.id}", "has_resource")
 
     elif node_type == "section":
         try:
