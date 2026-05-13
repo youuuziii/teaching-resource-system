@@ -120,10 +120,12 @@ function handleSizeChange(size) {
 
 async function download(item) {
   try {
+    await api.post('/api/action', { action: 'download', resource_id: item.id })
     const token = localStorage.getItem('token')
     const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000'
     const url = `${baseUrl}/api/resources/${item.id}/download?token=${token}`
     window.open(url, '_blank')
+    window.dispatchEvent(new Event('recommendations-updated'))
   } catch (e) {
     ElMessage.error('下载失败')
   }
@@ -138,6 +140,7 @@ async function favorite(item) {
     if (typeof resp?.data?.is_favorited === 'boolean') {
       item.is_favorited = resp.data.is_favorited
     }
+    window.dispatchEvent(new Event('recommendations-updated'))
     ElMessage.success(nextAction === 'favorite' ? '已收藏' : '已取消收藏')
   } catch (e) {
     item.is_favorited = previous
@@ -145,7 +148,13 @@ async function favorite(item) {
   }
 }
 
-function openDetail(item) {
+async function openDetail(item) {
+  if (!item?.id) return
+  try {
+    await api.post('/api/action', { action: 'view', resource_id: item.id })
+  } catch (e) {
+    // ignore tracking failure to avoid blocking navigation
+  }
   router.push(`/resources/${item.id}`)
 }
 
@@ -156,6 +165,30 @@ function resetQuery() {
   query.knowledge_point_id = null
   query.teacher_id = null
   fetchList()
+}
+
+async function recordVisibleItems() {
+  if (!isAuthed.value || !isStudent.value || !items.value.length) return
+  const seenKey = 'resource-list-seen-ids'
+  let seen = []
+  try {
+    seen = JSON.parse(sessionStorage.getItem(seenKey) || '[]')
+  } catch {
+    seen = []
+  }
+  const seenSet = new Set(Array.isArray(seen) ? seen : [])
+  const targetIds = items.value.map((item) => item.id).filter((rid) => !seenSet.has(rid))
+  if (!targetIds.length) return
+
+  await Promise.allSettled(
+    targetIds.map((resource_id) => api.post('/api/action', { action: 'view', resource_id })),
+  )
+  targetIds.forEach((rid) => seenSet.add(rid))
+  try {
+    sessionStorage.setItem(seenKey, JSON.stringify(Array.from(seenSet)))
+  } catch {
+    // ignore storage failure
+  }
 }
 
 watch(
@@ -172,6 +205,7 @@ onMounted(async () => {
   await fetchTeachers()
   await fetchKnowledgePoints(query.course_id)
   await fetchList()
+  await recordVisibleItems()
 })
 </script>
 

@@ -71,6 +71,15 @@ async function fetchDetail() {
   }
 }
 
+async function recordView() {
+  if (!resource.value?.id || !isAuthed.value || !roles.value.includes('student')) return
+  try {
+    await api.post('/api/action', { action: 'view', resource_id: resource.value.id })
+  } catch (e) {
+    // ignore tracking failure
+  }
+}
+
 function goBack() {
   router.back()
 }
@@ -232,12 +241,18 @@ async function cancelDeleteRequest() {
   }
 }
 
-function download() {
+async function download() {
   if (!resource.value) return
-  const token = localStorage.getItem('token')
-  const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000'
-  const url = `${baseUrl}/api/resources/${resource.value.id}/download?token=${token}`
-  window.open(url, '_blank')
+  try {
+    await api.post('/api/action', { action: 'download', resource_id: resource.value.id })
+    const token = localStorage.getItem('token')
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5000'
+    const url = `${baseUrl}/api/resources/${resource.value.id}/download?token=${token}`
+    window.open(url, '_blank')
+    window.dispatchEvent(new Event('recommendations-updated'))
+  } catch (e) {
+    ElMessage.error('下载失败')
+  }
 }
 
 async function toggleFavorite() {
@@ -246,6 +261,7 @@ async function toggleFavorite() {
   try {
     await api.post(`/api/resources/${resource.value.id}/favorite`, { action })
     resource.value.is_favorited = !resource.value.is_favorited
+    window.dispatchEvent(new Event('recommendations-updated'))
     ElMessage.success(action === 'favorite' ? '已收藏' : '已取消收藏')
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '操作失败')
@@ -301,7 +317,10 @@ const statusLabel = computed(() => {
   }
 })
 
-onMounted(fetchDetail)
+onMounted(async () => {
+  await fetchDetail()
+  await recordView()
+})
 </script>
 
 <template>

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { 
   Refresh, 
@@ -23,6 +23,8 @@ const favorites = ref([])
 
 const loadingRecommend = ref(false)
 const recommendations = ref([])
+const detailDialogVisible = ref(false)
+const detailCurrent = ref(null)
 
 const groupedFavorites = computed(() => {
   const groups = {}
@@ -53,6 +55,11 @@ function openDetail(res) {
   if (res?.id) router.push(`/resources/${res.id}`)
 }
 
+function openRecommendationDetail(row) {
+  detailCurrent.value = row || null
+  detailDialogVisible.value = true
+}
+
 async function fetchHistory() {
   loadingHistory.value = true
   try {
@@ -80,8 +87,12 @@ async function fetchFavorites() {
 async function fetchRecommendations() {
   loadingRecommend.value = true
   try {
-    const resp = await api.get('/api/recommendations')
-    recommendations.value = resp.data.items || []
+    const resp = await api.get('/api/resources/recommend')
+    const items = Array.isArray(resp.data.items) ? resp.data.items : []
+    recommendations.value = items.map((item) => ({
+      ...item,
+      reasons: Array.isArray(item.reasons) && item.reasons.length ? item.reasons : ['基于你的学习偏好推荐'],
+    }))
   } catch (e) {
     recommendations.value = []
   } finally {
@@ -95,12 +106,23 @@ function refreshAll() {
   if (tab.value === 'favorites') fetchFavorites()
 }
 
+function handleRecommendationsUpdated() {
+  if (tab.value === 'recommend') {
+    fetchRecommendations()
+  }
+}
+
 onMounted(async () => {
   if (isStudent.value) {
+    window.addEventListener('recommendations-updated', handleRecommendationsUpdated)
     await Promise.all([fetchHistory(), fetchFavorites(), fetchRecommendations()])
   } else {
     router.replace('/')
   }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('recommendations-updated', handleRecommendationsUpdated)
 })
 </script>
 
@@ -170,31 +192,41 @@ onMounted(async () => {
             </div>
           </template>
           
-          <el-table :data="recommendations" v-loading="loadingRecommend" border stripe style="width: 100%">
-            <el-table-column label="推荐资源" min-width="240">
-              <template #default="{ row }">
-                <div class="resource-cell" @click="openDetail(row.resource)">
-                  <el-icon class="file-icon"><Collection /></el-icon>
-                  <span class="res-title">{{ row.resource?.title }}</span>
+          <div v-loading="loadingRecommend" class="recommend-section">
+            <el-empty v-if="recommendations.length === 0" description="暂无推荐内容" />
+
+            <div v-else class="recommend-grid">
+              <el-card v-for="(row, idx) in recommendations" :key="row.resource?.id || idx" class="recommend-card" shadow="hover" @click="openDetail(row.resource)">
+                <div class="recommend-card__head">
+                  <div class="recommend-badge">{{ idx + 1 }}</div>
+                  <div class="recommend-title-wrap">
+                    <div class="recommend-title">{{ row.resource?.title }}</div>
+                    <div class="recommend-subtitle">
+                      {{ row.resource?.course || '通用课程' }}
+                      <span v-if="row.resource?.knowledge_point"> · {{ row.resource.knowledge_point }}</span>
+                    </div>
+                  </div>
                 </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="推荐理由" min-width="300">
-              <template #default="{ row }">
-                <div class="reason-tags">
-                  <el-tag v-for="reason in (row.reasons || [])" :key="reason" size="small" type="success" effect="plain">
+
+                <div class="recommend-tags">
+                  <el-tag
+                    v-for="reason in row.reasons"
+                    :key="reason"
+                    size="small"
+                    type="success"
+                    effect="plain"
+                  >
                     {{ reason }}
                   </el-tag>
-                  <span v-if="!row.reasons?.length" class="empty-text">系统基于您的学习偏好推荐</span>
                 </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="120" fixed="right" align="center">
-              <template #default="{ row }">
-                <el-button type="primary" link :icon="ArrowRight" @click="openDetail(row.resource)">去学习</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+
+                <div class="recommend-card__foot">
+                  <el-button type="primary" link :icon="ArrowRight">去学习</el-button>
+                  <el-button link @click.stop="openRecommendationDetail(row)">推荐详情</el-button>
+                </div>
+              </el-card>
+            </div>
+          </div>
         </el-tab-pane>
 
         <!-- History -->
@@ -227,6 +259,41 @@ onMounted(async () => {
           </el-table>
         </el-tab-pane>
       </el-tabs>
+
+      <el-dialog v-model="detailDialogVisible" title="推荐详情" width="680px">
+        <div v-if="detailCurrent" class="recommend-detail-panel">
+          <div class="recommend-detail-title">{{ detailCurrent.resource?.title }}</div>
+          <div class="recommend-detail-section">
+            <div class="section-label">推荐摘要</div>
+            <div class="section-content">{{ detailCurrent.detail?.summary || detailCurrent.reasons?.[0] || '基于学习行为和图谱关系推荐' }}</div>
+          </div>
+          <div class="recommend-detail-section">
+            <div class="section-label">行为依据</div>
+            <ul class="detail-list">
+              <li v-for="(item, idx) in (detailCurrent.detail?.behavior_notes || [])" :key="idx">{{ item }}</li>
+              <li v-if="!(detailCurrent.detail?.behavior_notes || []).length">暂无足够的行为依据，使用默认推荐策略</li>
+            </ul>
+          </div>
+          <div class="recommend-detail-section">
+            <div class="section-label">图谱路径</div>
+            <div v-if="(detailCurrent.detail?.graph_paths || []).length" class="path-list">
+              <div v-for="(pathItem, idx) in detailCurrent.detail.graph_paths" :key="idx" class="path-item">
+                <div class="path-reason">{{ pathItem.reason }}</div>
+                <div class="path-flow">
+                  <span v-for="(node, nIdx) in pathItem.path" :key="nIdx" class="path-node">
+                    {{ node.name || '未知节点' }}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="empty-text">当前推荐未命中明确图谱路径，主要基于知识点相似和学习行为</div>
+          </div>
+          <div v-if="detailCurrent.detail?.fallback" class="recommend-detail-section">
+            <div class="section-label">兜底说明</div>
+            <div class="section-content">{{ detailCurrent.detail.fallback }}</div>
+          </div>
+        </div>
+      </el-dialog>
     </el-card>
   </div>
 </template>
@@ -247,6 +314,85 @@ onMounted(async () => {
 .learning-page :deep(.el-table) {
   border-radius: 14px;
   overflow: hidden;
+}
+
+.recommend-section {
+  min-height: 420px;
+}
+
+.recommend-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.recommend-card {
+  cursor: pointer;
+  border-radius: 16px;
+  border: 1px solid #eef2ff;
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.recommend-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 28px rgba(69, 100, 245, 0.12);
+}
+
+.recommend-card__head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.recommend-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #4564f5, #7c8cff);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.recommend-title-wrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.recommend-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #303133;
+  line-height: 1.4;
+}
+
+.recommend-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.recommend-tags {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recommend-card__foot {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+@media (max-width: 1024px) {
+  .recommend-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .learning-page :deep(.el-collapse-item__header) {

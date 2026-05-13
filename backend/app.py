@@ -4695,7 +4695,7 @@ def _create_app() -> Flask:
             if action == "favorite":
                 _trigger_smart_push(db, user.id, neo4j_driver)
 
-            return jsonify({"ok": True, "is_favorited": action == "favorite"})
+            return jsonify({"ok": True, "is_favorited": action == "favorite", "need_refresh": True})
 
     @app.post("/api/resources/<int:resource_id>/teachers")
     def set_resource_teachers(resource_id: int):
@@ -4804,13 +4804,53 @@ def _create_app() -> Flask:
 
             return jsonify({"items": out_items})
 
+    def _recommend_response(db: Session, user_id: int, limit: int = 10):
+        items = _recommend(db, user_id=user_id, neo4j_driver=neo4j_driver, top_n=limit)
+        return jsonify(
+            {
+                "items": items,
+                "total": len(items),
+                "source": "graph_lightweight",
+            }
+        )
+
     @app.get("/api/recommendations")
     def recommendations():
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"student"})
-            items = _recommend(db, user_id=user.id, neo4j_driver=neo4j_driver)
-            return jsonify({"items": items})
+            return _recommend_response(db, user.id)
+
+    @app.get("/api/resources/recommend")
+    def recommend_resources():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"student"})
+            return _recommend_response(db, user.id)
+
+    @app.post("/api/action")
+    def record_action():
+        data = _json()
+        action = str(data.get("action", "")).strip().lower()
+        resource_id = _parse_int(data.get("resource_id"))
+        if action not in {"view", "favorite", "unfavorite", "download"}:
+            raise ApiError("BAD_REQUEST", "invalid action", 400)
+        if resource_id is None:
+            raise ApiError("BAD_REQUEST", "resource_id required", 400)
+
+        with SessionLocal() as db:
+            user = require_auth(db)
+            res = db.get(Resource, resource_id)
+            if not res:
+                raise ApiError("NOT_FOUND", "resource not found", 404)
+
+            if action == "download":
+                action = "view"
+            if action in {"view", "favorite", "unfavorite"}:
+                db.add(UserBehavior(user_id=user.id, resource_id=res.id, action=action))
+                db.commit()
+
+            return jsonify({"ok": True, "need_refresh": True})
 
     @app.get("/api/graph/overview")
     def graph_overview():
@@ -6845,88 +6885,235 @@ def _mysql_explore(db: Session, node_type: str, raw: str, expand: str) -> Dict[s
     return {"nodes": list(nodes.values()), "links": links, "resource_ids": resource_ids, "paths": {}}
 
 
-def _recommend(db: Session, user_id: int, neo4j_driver) -> List[Dict[str, Any]]:
-    # 1. 获取用户最近收藏/学习的资源
-    favored = (
+def _format_recommendation_detail(
+    reasons: List[str],
+    behavior_notes: List[str],
+    graph_paths: List[Dict[str, Any]],
+    fallback: str | None = None,
+) -> Dict[str, Any]:
+    detail = {
+        "behavior_notes": behavior_notes,
+        "graph_paths": graph_paths,
+    }
+    if fallback:
+        detail["fallback"] = fallback
+    if reasons:
+        detail["summary"] = reasons[0]
+    return detail
+
+
+def _recommend(db: Session, user_id: int, neo4j_driver, top_n: int = 10) -> List[Dict[str, Any]]:
+    """轻量推荐：基于现有图谱结构的规则重排，不依赖训练模型。"""
+
+    def _hot_resources(limit: int) -> List[Tuple[Resource, str]]:
+        rows = (
+            db.execute(
+                select(
+                    Resource,
+                    func.count(UserBehavior.id).label("view_count"),
+                )
+                .join(UserBehavior, UserBehavior.resource_id == Resource.id, isouter=True)
+                .where(Resource.status == "approved")
+                .group_by(Resource.id)
+                .order_by(func.count(UserBehavior.id).desc(), Resource.created_at.desc(), Resource.id.desc())
+                .limit(limit)
+            )
+            .all()
+        )
+        out: List[Tuple[Resource, str]] = []
+        for resource, _count in rows:
+            out.append((resource, "全站热门资源"))
+        return out
+
+    behavior_rows = (
         db.execute(
-            select(UserBehavior.resource_id)
+            select(UserBehavior.resource_id, UserBehavior.action)
             .where(UserBehavior.user_id == user_id)
-            .where(UserBehavior.action == "favorite")
-            .order_by(UserBehavior.created_at.desc())
-            .limit(20)
+            .where(UserBehavior.action.in_(["view", "favorite", "unfavorite"]))
+            .order_by(UserBehavior.created_at.desc(), UserBehavior.id.desc())
+            .limit(30)
         )
-        .scalars()
         .all()
     )
-    favored_set = set(favored)
 
-    # 2. 获取用户兴趣知识点
-    kp_names = (
-        db.execute(
-            select(KnowledgePoint.name)
-            .join(Resource, Resource.knowledge_point_id == KnowledgePoint.id)
-            .where(Resource.id.in_(favored))
-        )
-        .scalars()
-        .all()
-    )
-    user_interest_kps = {kp for kp in kp_names if kp}
+    behavior_notes = []
+    behavior_by_resource: Dict[int, List[str]] = {}
+    for rid, action in behavior_rows[:10]:
+        if rid is None:
+            continue
+        note = f"用户近期执行了{action}行为，关联资源ID为 {rid}"
+        behavior_notes.append(note)
+        behavior_by_resource.setdefault(int(rid), []).append(note)
 
-    # 3. 利用 Neo4j 扩展语义关联知识点
-    semantic_related_kps = {} # kp_name -> weight (0.1 - 1.0)
-    if neo4j_driver and user_interest_kps:
-        with neo4j_driver.session() as session:
-            # 查找直接关联或前置/后继知识点
-            query = """
-            MATCH p = (k1:KnowledgePoint)-[r:RELATED|PREREQUISITE*1..2]-(k2:KnowledgePoint)
-            WHERE k1.name IN $interests AND k1.name <> k2.name
-            RETURN k2.name as name, type(relationships(p)[0]) as rel_type, length(p) as dist
-            """
-            rows = session.run(query, {"interests": list(user_interest_kps)}).data()
-            for row in rows:
-                name = row["name"]
-                dist = row["dist"]
-                rel = row["rel_type"]
-                # 距离越近、关系越强，权重越高
-                weight = 0.8 if dist == 1 else 0.4
-                if rel == "PREREQUISITE": weight += 0.1
-                semantic_related_kps[name] = max(semantic_related_kps.get(name, 0), weight)
+    if not behavior_rows:
+        hot = _hot_resources(top_n)
+        return [
+            {
+                "resource": _resource_dto(r),
+                "reasons": [reason],
+                "detail": _format_recommendation_detail([reason], [], [], fallback="新用户冷启动，使用全站热门资源兜底"),
+            }
+            for r, reason in hot[:top_n]
+        ]
 
-    # 4. 候选资源评分
-    candidates = db.execute(select(Resource).where(Resource.status == "approved")).scalars().all()
+    recent_ids = [int(rid) for rid, _ in behavior_rows if rid is not None]
+    interacted_ids = set(recent_ids)
+    favorite_ids = {
+        int(rid)
+        for rid, action in behavior_rows
+        if rid is not None and action == "favorite"
+    }
+    if not favorite_ids:
+        favorite_ids = interacted_ids
+
+    # 用户兴趣知识点：从最近交互资源中提取
+    interest_rows = db.execute(
+        select(KnowledgePoint.name)
+        .join(Resource, Resource.knowledge_point_id == KnowledgePoint.id)
+        .where(Resource.id.in_(list(favorite_ids)))
+    ).all()
+    user_interest_kps = [name for (name,) in interest_rows if name]
+    user_interest_kp_set = set(user_interest_kps)
+
+    # 从图谱中取“后继/相关/前置”知识点，作为轻量重排序信号
+    graph_weights: Dict[str, float] = {}
+    graph_path_notes: Dict[str, List[Dict[str, Any]]] = {}
+    if neo4j_driver and user_interest_kp_set:
+        try:
+            with neo4j_driver.session() as session:
+                rows = session.run(
+                    """
+                    MATCH (k:KnowledgePoint)
+                    WHERE k.name IN $names
+                    OPTIONAL MATCH (k)-[:PREREQUISITE]->(next:KnowledgePoint)
+                    OPTIONAL MATCH (k)-[:RELATED]-(rel:KnowledgePoint)
+                    OPTIONAL MATCH (prev:KnowledgePoint)-[:PREREQUISITE]->(k)
+                    RETURN collect(DISTINCT next.name) AS next_names,
+                           collect(DISTINCT rel.name) AS rel_names,
+                           collect(DISTINCT prev.name) AS prev_names
+                    """,
+                    {"names": list(user_interest_kp_set)},
+                ).single()
+            if rows:
+                seed_kp = next(iter(user_interest_kp_set)) if user_interest_kp_set else None
+                for name in rows.get("next_names") or []:
+                    if name:
+                        name = str(name)
+                        graph_weights[name] = max(graph_weights.get(name, 0.0), 1.5)
+                        graph_path_notes.setdefault(name, []).append({
+                            "type": "PREREQUISITE",
+                            "path": [
+                                {"type": "knowledge_point", "name": seed_kp},
+                                {"type": "knowledge_point", "name": name},
+                            ],
+                            "reason": f"由知识点 {seed_kp} 的后继关系推荐",
+                        })
+                for name in rows.get("rel_names") or []:
+                    if name:
+                        name = str(name)
+                        graph_weights[name] = max(graph_weights.get(name, 0.0), 1.0)
+                        graph_path_notes.setdefault(name, []).append({
+                            "type": "RELATED",
+                            "path": [
+                                {"type": "knowledge_point", "name": seed_kp},
+                                {"type": "knowledge_point", "name": name},
+                            ],
+                            "reason": f"由知识点 {seed_kp} 的相关关系推荐",
+                        })
+                for name in rows.get("prev_names") or []:
+                    if name:
+                        name = str(name)
+                        graph_weights[name] = max(graph_weights.get(name, 0.0), 0.7)
+                        graph_path_notes.setdefault(name, []).append({
+                            "type": "PREREQUISITE",
+                            "path": [
+                                {"type": "knowledge_point", "name": name},
+                                {"type": "knowledge_point", "name": seed_kp},
+                            ],
+                            "reason": f"由知识点 {seed_kp} 的前置关系推荐",
+                        })
+        except Exception:
+            graph_weights = {}
+            graph_path_notes = {}
+
+    approved = db.execute(select(Resource).where(Resource.status == "approved")).scalars().all()
     scored: List[Tuple[float, Resource, List[str]]] = []
+    for r in approved:
+        if r.id in interacted_ids:
+            continue
 
-    for r in candidates:
-        if r.id in favored_set: continue
-        
         score = 0.0
-        reasons = []
+        reasons: List[str] = []
         kp_name = r.knowledge_point.name if r.knowledge_point else r.knowledge_point_name
-        
-        # 维度 A: 直接知识点匹配 (最高权重)
-        if kp_name and kp_name in user_interest_kps:
-            score += 10.0
-            reasons.append(f"基于你的学习兴趣：{kp_name}")
-            
-        # 维度 B: 知识图谱语义扩展 (中等权重)
-        elif kp_name and kp_name in semantic_related_kps:
-            weight = semantic_related_kps[kp_name]
-            score += 8.0 * weight
-            reasons.append(f"图谱发现：与你关注的知识点语义高度相关")
+        tags = {t.tag for t in r.tags}
 
-        # 维度 C: 标签重合度 (辅助权重)
-        tag_set = {t.tag for t in r.tags}
-        common_tags = tag_set.intersection(user_interest_kps)
-        if common_tags:
-            score += 2.0 * len(common_tags)
-            reasons.append(f"发现相似标签：{', '.join(list(common_tags)[:2])}")
+        resource_graph_notes = graph_path_notes.get(kp_name or '', [])
+        if kp_name and kp_name in user_interest_kp_set:
+            score += 3.0
+            reasons.append(f"关联到你近期关注的知识点：{kp_name}")
+        elif kp_name and kp_name in graph_weights:
+            weight = graph_weights[kp_name]
+            score += weight * 2.0
+            if weight >= 1.5:
+                reasons.append(f"知识图谱进阶推荐：{kp_name}")
+            elif weight >= 1.0:
+                reasons.append(f"知识图谱相关推荐：{kp_name}")
+            else:
+                reasons.append(f"知识图谱补充推荐：{kp_name}")
+
+        overlap = tags.intersection(user_interest_kp_set)
+        if overlap:
+            score += 0.5 * len(overlap)
+            reasons.append(f"标签匹配：{', '.join(sorted(list(overlap))[:2])}")
+
+        if r.course_id:
+            same_course_count = db.execute(
+                select(func.count(UserBehavior.id))
+                .join(Resource, Resource.id == UserBehavior.resource_id)
+                .where(UserBehavior.user_id == user_id)
+                .where(Resource.course_id == r.course_id)
+            ).scalar_one() or 0
+            if same_course_count:
+                score += min(1.0, same_course_count * 0.2)
+                reasons.append("同课程资源推荐")
 
         if score > 0:
+            # 把当前资源对应的图谱路径附加到详情中，避免每条推荐都显示一样的解释
+            if resource_graph_notes:
+                reasons.append(resource_graph_notes[0]["reason"])
             scored.append((score, r, reasons))
 
-    # 5. 排序并返回
-    scored.sort(key=lambda x: (-x[0], -x[1].id))
-    return [{"resource": _resource_dto(r), "reasons": reasons} for _, r, reasons in scored[:10]]
+    scored.sort(key=lambda x: (-x[0], -x[1].created_at.timestamp() if x[1].created_at else 0, -x[1].id))
+    if not scored:
+        hot = _hot_resources(top_n)
+        return [
+            {
+                "resource": _resource_dto(r),
+                "reasons": [reason],
+                "detail": _format_recommendation_detail([reason], behavior_notes, [], fallback="未匹配到足够强的图谱关系，使用热门资源兜底"),
+            }
+            for r, reason in hot[:top_n]
+        ]
+
+    out = []
+    for score, r, reasons in scored[:top_n]:
+        kp_name = r.knowledge_point.name if r.knowledge_point else r.knowledge_point_name
+        detail_graph = graph_path_notes.get(kp_name or '', [])
+        resource_id = int(r.id)
+        detail_behavior = behavior_by_resource.get(resource_id, behavior_notes[:3])
+        detail_summary = reasons[0] if reasons else "基于学习行为和图谱关系推荐"
+        out.append(
+            {
+                "resource": _resource_dto(r),
+                "reasons": reasons,
+                "detail": {
+                    "summary": detail_summary,
+                    "behavior_notes": detail_behavior,
+                    "graph_paths": detail_graph[:3],
+                },
+            }
+        )
+    return out
 
 def _trigger_smart_push(db: Session, user_id: int, neo4j_driver):
     """智能推送触发：发现高质量关联资源并发送通知"""
