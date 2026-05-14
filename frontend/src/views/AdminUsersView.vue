@@ -52,7 +52,7 @@ const pageOptions = ref([])
 
 const PAGE_GROUPS = [
   { title: '基础页面', paths: ['/', '/graph', '/profile'] },
-  { title: '学习与教学', paths: ['/learning', '/teacher/courses'] },
+  { title: '学习与教学', paths: ['/learning', '/teacher/courses', '/teacher/kp-relations'] },
   { title: '管理后台', paths: ['/admin/audit', '/admin/courses', '/admin/logs', '/admin/users'] },
 ]
 
@@ -315,10 +315,11 @@ onMounted(async () => {
       { id: 3, name: '个人中心', path: '/profile', component: null },
       { id: 4, name: '学习推荐', path: '/learning', component: null },
       { id: 5, name: '课程管理', path: '/teacher/courses', component: null },
-      { id: 6, name: '资源审核', path: '/admin/audit', component: null },
-      { id: 7, name: '课程分配', path: '/admin/courses', component: null },
-      { id: 8, name: '系统日志', path: '/admin/logs', component: null },
-      { id: 9, name: '账号管理', path: '/admin/users', component: null },
+      { id: 6, name: '知识点管理', path: '/teacher/kp-relations', component: null },
+      { id: 7, name: '资源审核', path: '/admin/audit', component: null },
+      { id: 8, name: '课程分配', path: '/admin/courses', component: null },
+      { id: 9, name: '系统日志', path: '/admin/logs', component: null },
+      { id: 10, name: '账号管理', path: '/admin/users', component: null },
     ]
   }
   await loadUsers()

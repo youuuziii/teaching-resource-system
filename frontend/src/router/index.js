@@ -42,8 +42,6 @@ function getAllowedPages() {
 
 function normalizePath(path) {
   if (path === '/resources' || path.startsWith('/resources/')) return '/resources/:id'
-  if (path === '/admin/audit') return '/audit'
-  if (path === '/admin/courses') return '/courses'
   return path
 }
 

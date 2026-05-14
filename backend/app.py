@@ -1411,18 +1411,23 @@ def _create_app() -> Flask:
                 # 最终兜底：关联到当前目录代表的知识点
                 target_kp = None
                 if res.section_id:
-                    target_kp = db.execute(select(KnowledgePoint).where(KnowledgePoint.section_id == res.section_id)).first()
+                    target_kp = db.execute(
+                        select(KnowledgePoint).where(KnowledgePoint.section_id == res.section_id)
+                    ).scalars().first()
                 if not target_kp and res.chapter_id:
-                    target_kp = db.execute(select(KnowledgePoint).where(KnowledgePoint.chapter_id == res.chapter_id, KnowledgePoint.section_id.is_(None))).first()
+                    target_kp = db.execute(
+                        select(KnowledgePoint).where(
+                            KnowledgePoint.chapter_id == res.chapter_id,
+                            KnowledgePoint.section_id.is_(None),
+                        )
+                    ).scalars().first()
                 
                 if target_kp:
-                    # 处理 RowProxy 情况
-                    kp_obj = target_kp[0] if isinstance(target_kp, tuple) else target_kp
-                    res.knowledge_point_id = kp_obj.id
-                    res.knowledge_point_name = kp_obj.name
-                    exists = any(rkp.knowledge_point_id == kp_obj.id for rkp in res.resource_knowledge_points)
+                    res.knowledge_point_id = target_kp.id
+                    res.knowledge_point_name = target_kp.name
+                    exists = any(rkp.knowledge_point_id == target_kp.id for rkp in res.resource_knowledge_points)
                     if not exists:
-                        res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=kp_obj.id))
+                        res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=target_kp.id))
                 elif course:
                     # 如果实在找不到，显示目录名称或课程名称
                     res.knowledge_point_name = current_dir_name or course.name
