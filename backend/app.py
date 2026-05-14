@@ -37,6 +37,7 @@ from sqlalchemy import (
     inspect,
     select,
     update,
+    and_,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -425,7 +426,8 @@ class UserBehavior(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id"), nullable=False)
-    action: Mapped[str] = mapped_column(Enum("view", "favorite", "unfavorite", name="behavior_action"), nullable=False)
+    # 使用字符串存储行为，兼容历史数据里可能出现的扩展行为值（如 download）
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
     user: Mapped[User] = relationship("User", back_populates="behaviors")
@@ -3479,6 +3481,53 @@ def _create_app() -> Flask:
             db.refresh(user)
             return jsonify({"user": _user_dto(user)})
 
+    def _recent_learning_behaviors(db: Session, user_id: int, limit: int = 50):
+        latest_subq = (
+            select(
+                UserBehavior.resource_id.label("resource_id"),
+                func.max(UserBehavior.created_at).label("max_created_at"),
+                func.max(UserBehavior.id).label("max_id"),
+            )
+            .where(UserBehavior.user_id == user_id)
+            .where(UserBehavior.action.in_(["view", "favorite", "unfavorite", "download"]))
+            .group_by(UserBehavior.resource_id)
+            .subquery()
+        )
+        return (
+            db.execute(
+                select(UserBehavior)
+                .join(
+                    latest_subq,
+                    and_(
+                        UserBehavior.resource_id == latest_subq.c.resource_id,
+                        UserBehavior.created_at == latest_subq.c.max_created_at,
+                        UserBehavior.id == latest_subq.c.max_id,
+                    ),
+                )
+                .where(UserBehavior.user_id == user_id)
+                .where(UserBehavior.action.in_(["view", "favorite", "unfavorite", "download"]))
+                .order_by(UserBehavior.created_at.desc(), UserBehavior.id.desc())
+                .limit(limit)
+            )
+            .scalars()
+            .all()
+        )
+
+    def _prune_user_behaviors(db: Session, user_id: int, keep_limit: int = 50) -> None:
+        keep_limit = max(1, int(keep_limit))
+        keep_ids_subq = (
+            select(UserBehavior.id)
+            .where(UserBehavior.user_id == user_id)
+            .order_by(UserBehavior.created_at.desc(), UserBehavior.id.desc())
+            .limit(keep_limit)
+            .subquery()
+        )
+        db.execute(
+            delete(UserBehavior)
+            .where(UserBehavior.user_id == user_id)
+            .where(~UserBehavior.id.in_(select(keep_ids_subq.c.id)))
+        )
+
     @app.get("/api/me/history")
     def me_history():
         limit = _parse_int(request.args.get("limit")) or 50
@@ -3486,20 +3535,10 @@ def _create_app() -> Flask:
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"student"})
-            behaviors = (
-                db.execute(
-                    select(UserBehavior)
-                    .where(UserBehavior.user_id == user.id)
-                    .where(UserBehavior.action == "view")
-                    .order_by(UserBehavior.created_at.desc())
-                    .limit(limit)
-                )
-                .scalars()
-                .all()
-            )
-            resource_ids = [b.resource_id for b in behaviors]
-            if not resource_ids:
+            behaviors = _recent_learning_behaviors(db, user.id, limit)
+            if not behaviors:
                 return jsonify({"items": []})
+            resource_ids = list(dict.fromkeys([b.resource_id for b in behaviors]))
             resources = db.execute(select(Resource).where(Resource.id.in_(resource_ids))).scalars().all()
             by_id = {r.id: r for r in resources}
             items = []
@@ -3507,7 +3546,12 @@ def _create_app() -> Flask:
                 r = by_id.get(b.resource_id)
                 if not r:
                     continue
-                items.append({"resource": _resource_dto(r), "viewed_at": b.created_at.isoformat()})
+                items.append({
+                    "resource": _resource_dto(r),
+                    "action": b.action,
+                    "updated_at": b.created_at.isoformat() if b.created_at else None,
+                    "updated_at_display": b.created_at.strftime("%Y-%m-%d %H:%M:%S") if b.created_at else None,
+                })
             return jsonify({"items": items})
 
     @app.get("/api/me/favorites")
@@ -3520,7 +3564,7 @@ def _create_app() -> Flask:
                     select(UserBehavior)
                     .where(UserBehavior.user_id == user.id)
                     .where(UserBehavior.action.in_(["favorite", "unfavorite"]))
-                    .order_by(UserBehavior.created_at.desc())
+                    .order_by(UserBehavior.created_at.desc(), UserBehavior.id.desc())
                     .limit(1000)
                 )
                 .scalars()
@@ -4281,8 +4325,8 @@ def _create_app() -> Flask:
                 # approved resources can be downloaded by everyone
                 pass
             if res.status == "approved":
-                db.add(UserBehavior(user_id=user.id, resource_id=res.id, action="view"))
-                db.commit()
+                # 下载行为由前端显式上报，这里保留只负责文件发送
+                pass
 
             p = Path(res.file_path)
             return send_from_directory(p.parent, p.name, as_attachment=True, download_name=res.file_name)
@@ -4697,10 +4741,16 @@ def _create_app() -> Flask:
             db.add(UserBehavior(user_id=user.id, resource_id=resource_id, action=action))
             db.commit()
 
+            refresh_targets = ["recent_learning", "recommendations", "favorites"]
             if action == "favorite":
                 _trigger_smart_push(db, user.id, neo4j_driver)
 
-            return jsonify({"ok": True, "is_favorited": action == "favorite", "need_refresh": True})
+            return jsonify({
+                "ok": True,
+                "is_favorited": action == "favorite",
+                "need_refresh": True,
+                "refresh_targets": refresh_targets,
+            })
 
     @app.post("/api/resources/<int:resource_id>/teachers")
     def set_resource_teachers(resource_id: int):
@@ -4809,13 +4859,14 @@ def _create_app() -> Flask:
 
             return jsonify({"items": out_items})
 
-    def _recommend_response(db: Session, user_id: int, limit: int = 10):
-        items = _recommend(db, user_id=user_id, neo4j_driver=neo4j_driver, top_n=limit)
+    def _recommend_response(db: Session, user_id: int, limit: int = 10, debug: bool = False):
+        items = _recommend(db, user_id=user_id, neo4j_driver=neo4j_driver, top_n=limit, debug=debug)
         return jsonify(
             {
                 "items": items,
                 "total": len(items),
                 "source": "graph_lightweight",
+                "debug": bool(debug),
             }
         )
 
@@ -4824,14 +4875,16 @@ def _create_app() -> Flask:
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"student"})
-            return _recommend_response(db, user.id)
+            debug = str(request.args.get("debug", "false")).lower() in {"1", "true", "yes", "on"}
+            return _recommend_response(db, user.id, debug=debug)
 
     @app.get("/api/resources/recommend")
     def recommend_resources():
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"student"})
-            return _recommend_response(db, user.id)
+            debug = str(request.args.get("debug", "false")).lower() in {"1", "true", "yes", "on"}
+            return _recommend_response(db, user.id, debug=debug)
 
     @app.post("/api/action")
     def record_action():
@@ -4847,13 +4900,29 @@ def _create_app() -> Flask:
             user = require_auth(db)
             res = db.get(Resource, resource_id)
             if not res:
+                print(f"[action] resource not found: user_id={user.id}, resource_id={resource_id}, action={action}")
                 raise ApiError("NOT_FOUND", "resource not found", 404)
 
-            if action == "download":
-                action = "view"
-            if action in {"view", "favorite", "unfavorite"}:
-                db.add(UserBehavior(user_id=user.id, resource_id=res.id, action=action))
-                db.commit()
+            print(
+                f"[action] incoming: user_id={user.id}, resource_id={resource_id}, action={action}, "
+                f"resource_status={res.status}, file_name={res.file_name}"
+            )
+
+            if action in {"view", "favorite", "unfavorite", "download"}:
+                try:
+                    db.add(UserBehavior(user_id=user.id, resource_id=res.id, action=action))
+                    print(f"[action] added behavior object: user_id={user.id}, resource_id={res.id}, action={action}")
+                    _prune_user_behaviors(db, user.id, keep_limit=50)
+                    print(f"[action] prune old behaviors success: user_id={user.id}, keep_limit=50")
+                    db.commit()
+                    print(f"[action] commit success: user_id={user.id}, resource_id={res.id}, action={action}")
+                except Exception as exc:
+                    db.rollback()
+                    print(
+                        f"[action] commit failed: user_id={user.id}, resource_id={res.id}, action={action}, "
+                        f"error={exc!r}"
+                    )
+                    raise
 
             return jsonify({"ok": True, "need_refresh": True})
 
@@ -6907,7 +6976,23 @@ def _format_recommendation_detail(
     return detail
 
 
-def _recommend(db: Session, user_id: int, neo4j_driver, top_n: int = 10) -> List[Dict[str, Any]]:
+RECOMMEND_WEIGHTS = {
+    "direct_kp_match": 60.0,
+    "same_section": 35.0,
+    "same_chapter_cross_section": 20.0,
+    "same_course": 8.0,
+    "section_cooccurrence_step": 4.0,
+    "section_cooccurrence_max": 12.0,
+}
+
+RECOMMEND_WEIGHT_HINTS = {
+    "kp_resource_kp": RECOMMEND_WEIGHTS["direct_kp_match"],
+    "kp_section_kp": RECOMMEND_WEIGHTS["same_section"],
+    "kp_section_chapter_section_kp": RECOMMEND_WEIGHTS["same_chapter_cross_section"],
+}
+
+
+def _recommend(db: Session, user_id: int, neo4j_driver, top_n: int = 10, debug: bool = False) -> List[Dict[str, Any]]:
     """轻量推荐：基于现有图谱结构的规则重排，不依赖训练模型。"""
 
     def _hot_resources(limit: int) -> List[Tuple[Resource, str]]:
@@ -6980,113 +7065,272 @@ def _recommend(db: Session, user_id: int, neo4j_driver, top_n: int = 10) -> List
     user_interest_kps = [name for (name,) in interest_rows if name]
     user_interest_kp_set = set(user_interest_kps)
 
-    # 从图谱中取“后继/相关/前置”知识点，作为轻量重排序信号
-    graph_weights: Dict[str, float] = {}
-    graph_path_notes: Dict[str, List[Dict[str, Any]]] = {}
-    if neo4j_driver and user_interest_kp_set:
-        try:
-            with neo4j_driver.session() as session:
-                rows = session.run(
-                    """
-                    MATCH (k:KnowledgePoint)
-                    WHERE k.name IN $names
-                    OPTIONAL MATCH (k)-[:PREREQUISITE]->(next:KnowledgePoint)
-                    OPTIONAL MATCH (k)-[:RELATED]-(rel:KnowledgePoint)
-                    OPTIONAL MATCH (prev:KnowledgePoint)-[:PREREQUISITE]->(k)
-                    RETURN collect(DISTINCT next.name) AS next_names,
-                           collect(DISTINCT rel.name) AS rel_names,
-                           collect(DISTINCT prev.name) AS prev_names
-                    """,
-                    {"names": list(user_interest_kp_set)},
-                ).single()
-            if rows:
-                seed_kp = next(iter(user_interest_kp_set)) if user_interest_kp_set else None
-                for name in rows.get("next_names") or []:
-                    if name:
-                        name = str(name)
-                        graph_weights[name] = max(graph_weights.get(name, 0.0), 1.5)
-                        graph_path_notes.setdefault(name, []).append({
-                            "type": "PREREQUISITE",
-                            "path": [
-                                {"type": "knowledge_point", "name": seed_kp},
-                                {"type": "knowledge_point", "name": name},
-                            ],
-                            "reason": f"由知识点 {seed_kp} 的后继关系推荐",
-                        })
-                for name in rows.get("rel_names") or []:
-                    if name:
-                        name = str(name)
-                        graph_weights[name] = max(graph_weights.get(name, 0.0), 1.0)
-                        graph_path_notes.setdefault(name, []).append({
-                            "type": "RELATED",
-                            "path": [
-                                {"type": "knowledge_point", "name": seed_kp},
-                                {"type": "knowledge_point", "name": name},
-                            ],
-                            "reason": f"由知识点 {seed_kp} 的相关关系推荐",
-                        })
-                for name in rows.get("prev_names") or []:
-                    if name:
-                        name = str(name)
-                        graph_weights[name] = max(graph_weights.get(name, 0.0), 0.7)
-                        graph_path_notes.setdefault(name, []).append({
-                            "type": "PREREQUISITE",
-                            "path": [
-                                {"type": "knowledge_point", "name": name},
-                                {"type": "knowledge_point", "name": seed_kp},
-                            ],
-                            "reason": f"由知识点 {seed_kp} 的前置关系推荐",
-                        })
-        except Exception:
-            graph_weights = {}
-            graph_path_notes = {}
-
+    # 基于“知识点-小节-章节-小节-知识点”和“知识点-资源-知识点”的路径做轻量推荐
+    # 说明：当前图谱里没有知识点间直接边，因此这里不依赖 PREREQUISITE / RELATED
     approved = db.execute(select(Resource).where(Resource.status == "approved")).scalars().all()
-    scored: List[Tuple[float, Resource, List[str]]] = []
+
+    # 用户最近交互资源对应的上下文
+    interest_resource_ids = list(dict.fromkeys(recent_ids))
+    interest_resources = []
+    if interest_resource_ids:
+        interest_resources = db.execute(
+            select(Resource).where(Resource.id.in_(interest_resource_ids))
+        ).scalars().all()
+
+    interest_kp_ids = set()
+    interest_section_ids = set()
+    interest_chapter_ids = set()
+    interest_course_ids = set()
+    interest_kp_names: set[str] = set()
+    interest_section_names: set[str] = set()
+    interest_chapter_names: set[str] = set()
+
+    # 预加载章节/小节元信息，给路径加权使用
+    section_meta: Dict[int, Dict[str, Any]] = {}
+    chapter_to_section_ids: Dict[int, List[int]] = {}
+    section_to_kp_names: Dict[int, List[str]] = {}
+    section_rows = db.execute(select(Section.id, Section.chapter_id, Section.name, Section.order_index)).all()
+    for sid, chid, sname, sorder in section_rows:
+        if chid is None:
+            continue
+        section_meta[int(sid)] = {"chapter_id": int(chid), "name": sname, "order_index": int(sorder or 0)}
+        chapter_to_section_ids.setdefault(int(chid), []).append(int(sid))
+
+    kp_rows = db.execute(select(KnowledgePoint.section_id, KnowledgePoint.name)).all()
+    for sec_id, kp_name in kp_rows:
+        if sec_id is None or not kp_name:
+            continue
+        section_to_kp_names.setdefault(int(sec_id), []).append(str(kp_name))
+
+    for item in interest_resources:
+        if item.knowledge_point_id:
+            interest_kp_ids.add(item.knowledge_point_id)
+        if item.section_id:
+            interest_section_ids.add(item.section_id)
+        if item.chapter_id:
+            interest_chapter_ids.add(item.chapter_id)
+        if item.course_id:
+            interest_course_ids.add(item.course_id)
+        if item.knowledge_point:
+            interest_kp_names.add(item.knowledge_point.name)
+        elif item.knowledge_point_name:
+            interest_kp_names.update([x.strip() for x in item.knowledge_point_name.split(",") if x.strip()])
+        if item.section:
+            interest_section_names.add(item.section.name)
+        elif item.section_name:
+            interest_section_names.add(item.section_name)
+        if item.chapter:
+            interest_chapter_names.add(item.chapter.name)
+        elif item.chapter_name:
+            interest_chapter_names.add(item.chapter_name)
+
+    def _compact(value: Optional[str]) -> str:
+        return re.sub(r"\s+", "", (value or "").strip())
+
+    def _resource_kp_names(resource: Resource) -> List[str]:
+        names: List[str] = []
+        if resource.knowledge_point:
+            names.append(resource.knowledge_point.name)
+        elif resource.knowledge_point_name:
+            names.extend([x.strip() for x in resource.knowledge_point_name.split(",") if x.strip()])
+        return names
+
+    def _section_order(section_id: Optional[int]) -> int:
+        if section_id is None:
+            return 0
+        meta = section_meta.get(int(section_id))
+        return int(meta.get("order_index", 0)) if meta else 0
+
+    def _section_name(section_id: Optional[int]) -> Optional[str]:
+        if section_id is None:
+            return None
+        meta = section_meta.get(int(section_id))
+        return meta.get("name") if meta else None
+
+    def _resource_paths(resource: Resource) -> List[Dict[str, Any]]:
+        paths: List[Dict[str, Any]] = []
+        kp_names = _resource_kp_names(resource)
+        kp_label = kp_names[0] if kp_names else None
+        sec_label = resource.section.name if resource.section else resource.section_name
+        ch_label = resource.chapter.name if resource.chapter else resource.chapter_name
+        if kp_label and resource.section_id:
+            paths.append({
+                "type": "kp_section",
+                "weight_hint": RECOMMEND_WEIGHT_HINTS["kp_section_kp"],
+                "reason": "知识点挂载到同一小节",
+                "path": [
+                    {"type": "knowledge_point", "name": kp_label},
+                    {"type": "section", "name": sec_label or f"section:{resource.section_id}"},
+                ],
+            })
+        if kp_label and resource.chapter_id:
+            paths.append({
+                "type": "kp_section_chapter_section_kp",
+                "weight_hint": RECOMMEND_WEIGHT_HINTS["kp_section_chapter_section_kp"],
+                "reason": "知识点经由小节-章节-小节形成间接关联",
+                "path": [
+                    {"type": "knowledge_point", "name": kp_label},
+                    {"type": "section", "name": sec_label or (f"section:{resource.section_id}" if resource.section_id else "")},
+                    {"type": "chapter", "name": ch_label or f"chapter:{resource.chapter_id}"},
+                    {"type": "section", "name": sec_label or (f"section:{resource.section_id}" if resource.section_id else "")},
+                    {"type": "knowledge_point", "name": kp_label},
+                ],
+            })
+        return paths
+
+    scored: List[Tuple[float, Resource, List[str], List[Dict[str, Any]], List[Dict[str, Any]]]] = []
     for r in approved:
         if r.id in interacted_ids:
             continue
 
         score = 0.0
         reasons: List[str] = []
-        kp_name = r.knowledge_point.name if r.knowledge_point else r.knowledge_point_name
-        tags = {t.tag for t in r.tags}
+        graph_paths: List[Dict[str, Any]] = []
+        score_breakdown: List[Dict[str, Any]] = []
+        kp_names = _resource_kp_names(r)
+        kp_name = kp_names[0] if kp_names else None
+        sec_name = r.section.name if r.section else r.section_name
+        ch_name = r.chapter.name if r.chapter else r.chapter_name
+        kp_compact = _compact(kp_name)
+        sec_compact = _compact(sec_name)
+        ch_compact = _compact(ch_name)
 
-        resource_graph_notes = graph_path_notes.get(kp_name or '', [])
-        if kp_name and kp_name in user_interest_kp_set:
-            score += 3.0
-            reasons.append(f"关联到你近期关注的知识点：{kp_name}")
-        elif kp_name and kp_name in graph_weights:
-            weight = graph_weights[kp_name]
-            score += weight * 2.0
-            if weight >= 1.5:
-                reasons.append(f"知识图谱进阶推荐：{kp_name}")
-            elif weight >= 1.0:
-                reasons.append(f"知识图谱相关推荐：{kp_name}")
+        # 1) 同知识点 / 同资源知识点，最高权重
+        matched_kp = False
+        for name in kp_names:
+            if r.knowledge_point_id and r.knowledge_point_id in interest_kp_ids:
+                matched_kp = True
+                break
+            if name in interest_kp_names:
+                matched_kp = True
+                break
+        if matched_kp:
+            delta = RECOMMEND_WEIGHTS["direct_kp_match"]
+            score += delta
+            reasons.append(f"直接命中关注知识点：{kp_name or '未命名知识点'}")
+            score_breakdown.append({"rule": "direct_kp_match", "delta": delta, "detail": kp_name or "未命名知识点"})
+            graph_paths.append({
+                "type": "kp_resource_kp",
+                "weight": delta,
+                "reason": "知识点-资源-知识点直接命中",
+                "path": [{"type": "knowledge_point", "name": kp_name}],
+            })
+
+        # 2) 同小节知识点
+        if r.section_id and r.section_id in interest_section_ids:
+            delta = RECOMMEND_WEIGHTS["same_section"]
+            score += delta
+            reasons.append(f"同小节推荐：{sec_name or r.section_id}")
+            score_breakdown.append({"rule": "same_section", "delta": delta, "detail": sec_name or f"section:{r.section_id}"})
+            graph_paths.append({
+                "type": "kp_section_kp",
+                "weight": delta,
+                "reason": "知识点-小节-知识点路径命中",
+                "path": [
+                    {"type": "knowledge_point", "name": kp_name},
+                    {"type": "section", "name": sec_name or f"section:{r.section_id}"},
+                    {"type": "knowledge_point", "name": kp_name},
+                ],
+            })
+
+        # 3) 同章节不同小节知识点：按章节内顺序关系细化加权
+        if r.chapter_id and r.chapter_id in interest_chapter_ids and not (r.section_id and r.section_id in interest_section_ids):
+            same_chapter_sections = chapter_to_section_ids.get(int(r.chapter_id), [])
+            sec_index = _section_order(r.section_id)
+            close_bonus = 0.0
+            prev_count = 0
+            next_count = 0
+            for sid in same_chapter_sections:
+                if sid in interest_section_ids:
+                    idx = _section_order(sid)
+                    if idx < sec_index:
+                        prev_count += 1
+                    elif idx > sec_index:
+                        next_count += 1
+            # 距离用户关注的小节越近，加分越高；往后的小节通常更像“顺延学习”
+            if prev_count or next_count:
+                proximity = max(prev_count, next_count)
+                close_bonus = min(10.0, proximity * 3.0)
+                if next_count > prev_count:
+                    close_bonus += 4.0
+                elif prev_count > next_count:
+                    close_bonus += 1.5
+
+            section_kp_overlap = 0
+            for sid in same_chapter_sections:
+                if sid in interest_section_ids:
+                    continue
+                shared = set(section_to_kp_names.get(sid, [])).intersection(interest_kp_names)
+                if shared:
+                    section_kp_overlap += len(shared)
+
+            overlap_bonus = min(8.0, section_kp_overlap * 2.0)
+            total_cross_section_bonus = RECOMMEND_WEIGHTS["same_chapter_cross_section"] + close_bonus + overlap_bonus
+            score += total_cross_section_bonus
+
+            sec_label = _section_name(r.section_id) or sec_name or r.section_id
+            if next_count > prev_count:
+                trend_label = "顺延学习"
+            elif prev_count > next_count:
+                trend_label = "回补学习"
             else:
-                reasons.append(f"知识图谱补充推荐：{kp_name}")
+                trend_label = "章节拓展"
 
-        overlap = tags.intersection(user_interest_kp_set)
-        if overlap:
-            score += 0.5 * len(overlap)
-            reasons.append(f"标签匹配：{', '.join(sorted(list(overlap))[:2])}")
+            reasons.append(f"同章节{trend_label}推荐：{ch_name or r.chapter_id}")
+            if close_bonus:
+                reasons.append(f"章节顺序邻近加权 +{close_bonus:.0f}")
+            if overlap_bonus:
+                reasons.append(f"章节内知识点共现加权 +{overlap_bonus:.0f}")
+            score_breakdown.append({
+                "rule": "same_chapter_cross_section",
+                "delta": round(total_cross_section_bonus, 2),
+                "trend": trend_label,
+                "prev_count": prev_count,
+                "next_count": next_count,
+                "close_bonus": round(close_bonus, 2),
+                "overlap_bonus": round(overlap_bonus, 2),
+                "chapter": ch_name or f"chapter:{r.chapter_id}",
+            })
+            graph_paths.append({
+                "type": "kp_section_chapter_section_kp",
+                "weight": round(total_cross_section_bonus, 2),
+                "reason": "知识点-小节-章节-小节-知识点路径命中",
+                "path": [
+                    {"type": "knowledge_point", "name": kp_name},
+                    {"type": "section", "name": sec_label or (f"section:{r.section_id}" if r.section_id else "")},
+                    {"type": "chapter", "name": ch_name or f"chapter:{r.chapter_id}"},
+                    {"type": "section", "name": sec_label or (f"section:{r.section_id}" if r.section_id else "")},
+                    {"type": "knowledge_point", "name": kp_name},
+                ],
+            })
 
-        if r.course_id:
-            same_course_count = db.execute(
-                select(func.count(UserBehavior.id))
-                .join(Resource, Resource.id == UserBehavior.resource_id)
-                .where(UserBehavior.user_id == user_id)
-                .where(Resource.course_id == r.course_id)
-            ).scalar_one() or 0
-            if same_course_count:
-                score += min(1.0, same_course_count * 0.2)
-                reasons.append("同课程资源推荐")
+        # 4) 同课程的章节/小节邻近资源，作为较弱补充
+        if r.course_id and r.course_id in interest_course_ids:
+            delta = RECOMMEND_WEIGHTS["same_course"]
+            score += delta
+            reasons.append("同课程补充推荐")
+            score_breakdown.append({"rule": "same_course", "delta": delta, "detail": f"course:{r.course_id}"})
+
+        # 5) 同章节内知识点共现：如果当前资源的小节和用户关注知识点存在交集，则再加权
+        if r.section_id and interest_kp_names:
+            current_section_kps = set(section_to_kp_names.get(int(r.section_id), []))
+            shared_kps = current_section_kps.intersection(interest_kp_names)
+            if shared_kps:
+                bonus = min(
+                    RECOMMEND_WEIGHTS["section_cooccurrence_max"],
+                    len(shared_kps) * RECOMMEND_WEIGHTS["section_cooccurrence_step"],
+                )
+                score += bonus
+                reasons.append(f"同章节知识点共现加权 +{bonus:.0f}（{', '.join(sorted(shared_kps)[:2])}）")
+                score_breakdown.append({"rule": "section_cooccurrence", "delta": bonus, "shared_kps": sorted(shared_kps)[:2]})
 
         if score > 0:
-            # 把当前资源对应的图谱路径附加到详情中，避免每条推荐都显示一样的解释
-            if resource_graph_notes:
-                reasons.append(resource_graph_notes[0]["reason"])
-            scored.append((score, r, reasons))
+            # 按权重从高到低输出解释路径
+            graph_paths.extend(_resource_paths(r))
+            graph_paths.sort(key=lambda x: float(x.get("weight", x.get("weight_hint", 0)) or 0), reverse=True)
+            if debug:
+                graph_paths = graph_paths[:5]
+            scored.append((score, r, reasons, graph_paths, score_breakdown))
 
     scored.sort(key=lambda x: (-x[0], -x[1].created_at.timestamp() if x[1].created_at else 0, -x[1].id))
     if not scored:
@@ -7095,29 +7339,36 @@ def _recommend(db: Session, user_id: int, neo4j_driver, top_n: int = 10) -> List
             {
                 "resource": _resource_dto(r),
                 "reasons": [reason],
-                "detail": _format_recommendation_detail([reason], behavior_notes, [], fallback="未匹配到足够强的图谱关系，使用热门资源兜底"),
+                "detail": _format_recommendation_detail([reason], behavior_notes, [], fallback="未匹配到足够强的路径关系，使用热门资源兜底"),
             }
             for r, reason in hot[:top_n]
         ]
 
     out = []
-    for score, r, reasons in scored[:top_n]:
-        kp_name = r.knowledge_point.name if r.knowledge_point else r.knowledge_point_name
-        detail_graph = graph_path_notes.get(kp_name or '', [])
+    for score, r, reasons, graph_paths, score_breakdown in scored[:top_n]:
         resource_id = int(r.id)
         detail_behavior = behavior_by_resource.get(resource_id, behavior_notes[:3])
-        detail_summary = reasons[0] if reasons else "基于学习行为和图谱关系推荐"
-        out.append(
-            {
-                "resource": _resource_dto(r),
-                "reasons": reasons,
-                "detail": {
-                    "summary": detail_summary,
-                    "behavior_notes": detail_behavior,
-                    "graph_paths": detail_graph[:3],
+        detail_summary = reasons[0] if reasons else "基于学习行为和路径关系推荐"
+        item: Dict[str, Any] = {
+            "resource": _resource_dto(r),
+            "reasons": reasons,
+            "score": round(score, 2),
+            "detail": {
+                "summary": detail_summary,
+                "behavior_notes": detail_behavior,
+                "graph_paths": graph_paths[:5],
+            },
+        }
+        if debug:
+            item["debug"] = {
+                "score_breakdown": score_breakdown,
+                "interests": {
+                    "knowledge_points": sorted(list(interest_kp_names))[:20],
+                    "sections": sorted(list(interest_section_names))[:20],
+                    "chapters": sorted(list(interest_chapter_names))[:20],
                 },
             }
-        )
+        out.append(item)
     return out
 
 def _trigger_smart_push(db: Session, user_id: int, neo4j_driver):

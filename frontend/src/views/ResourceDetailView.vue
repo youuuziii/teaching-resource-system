@@ -250,6 +250,7 @@ async function download() {
     const url = `${baseUrl}/api/resources/${resource.value.id}/download?token=${token}`
     window.open(url, '_blank')
     window.dispatchEvent(new Event('recommendations-updated'))
+    window.dispatchEvent(new Event('learning-history-updated'))
   } catch (e) {
     ElMessage.error('下载失败')
   }

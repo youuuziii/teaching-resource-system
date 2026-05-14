@@ -8,7 +8,8 @@ import {
   Star,
   ArrowRight,
   Monitor,
-  Reading
+  Reading,
+  Histogram
 } from '@element-plus/icons-vue'
 import api from '../api/client'
 
@@ -25,6 +26,22 @@ const loadingRecommend = ref(false)
 const recommendations = ref([])
 const detailDialogVisible = ref(false)
 const detailCurrent = ref(null)
+
+function formatDateTime(value) {
+  if (!value) return '-'
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? '-' : d.toLocaleString()
+}
+
+function actionLabel(action) {
+  const map = {
+    view: '浏览',
+    favorite: '收藏',
+    unfavorite: '取消收藏',
+    download: '下载',
+  }
+  return map[action] || action || '未知'
+}
 
 const groupedFavorites = computed(() => {
   const groups = {}
@@ -112,9 +129,15 @@ function handleRecommendationsUpdated() {
   }
 }
 
+function handleLearningHistoryUpdated() {
+  fetchHistory()
+  fetchFavorites()
+}
+
 onMounted(async () => {
   if (isStudent.value) {
     window.addEventListener('recommendations-updated', handleRecommendationsUpdated)
+    window.addEventListener('learning-history-updated', handleLearningHistoryUpdated)
     await Promise.all([fetchHistory(), fetchFavorites(), fetchRecommendations()])
   } else {
     router.replace('/')
@@ -123,6 +146,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('recommendations-updated', handleRecommendationsUpdated)
+  window.removeEventListener('learning-history-updated', handleLearningHistoryUpdated)
 })
 </script>
 
@@ -188,7 +212,7 @@ onBeforeUnmount(() => {
         <el-tab-pane name="recommend">
           <template #label>
             <div class="tab-label">
-              <el-icon><Star /></el-icon>智能推荐
+              <el-icon><Histogram /></el-icon>个性化推荐
             </div>
           </template>
           
@@ -246,9 +270,14 @@ onBeforeUnmount(() => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column prop="viewed_at" label="最后查看时间" width="220">
+            <el-table-column prop="updated_at" label="最后查看时间" width="220">
               <template #default="{ row }">
-                {{ new Date(row.viewed_at).toLocaleString() }}
+                {{ formatDateTime(row.updated_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="action" label="操作类型" width="120">
+              <template #default="{ row }">
+                <el-tag size="small" type="info" effect="plain">{{ actionLabel(row.action) }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="120" fixed="right" align="center">

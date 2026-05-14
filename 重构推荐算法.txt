@@ -1,0 +1,22 @@
+可以按照以下逻辑重构推荐算法：
+第一步：重构 Neo4j 查询逻辑（支持多跳路径）
+不要只查 (k1)-[:NEXT_TO]->(k2)。让 Cursor 写一个支持“路径深度”的 Cypher 查询：
+Cypher
+// 示例逻辑：查找与当前兴趣知识点通过“小节”或“资源”关联的其他知识点
+MATCH (current:KnowledgePoint {name: $kp_name})
+OPTIONAL MATCH (current)-[:属于]->(s:Section)<-[:属于]-(related:KnowledgePoint)
+OPTIONAL MATCH (current)<-[:关联]-(r:Resource)-[:关联]->(sim:KnowledgePoint)
+RETURN related, sim, count(*) as weight
+ORDER BY weight DESC LIMIT 10
+
+第二步：实现“规则加权排序” 
+在后端 recommend_service.py 中，根据路径的“远近”打分 ：
+直接命中同资源知识点：+50分 。 
+同小节知识点：+30分 。 
+同章节不同小节知识点：+15分 。 
+全站热门（冷启动兜底）：基础分 。 
+
+第三步：添加“推荐理由”生成器 
+为了体现图谱的“可解释性”，根据路径来源返回理由 ： 
+“源于你对同小节知识点 [X] 的关注” 。 
+“本章节其他同学也在看的关联知识” 。 
