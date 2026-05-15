@@ -282,7 +282,7 @@ onMounted(async () => {
             <div class="info-item">
               <el-icon><Clock /></el-icon>
               <span class="label">注册时间</span>
-              <span class="value">{{ user?.created_at ? new Date(user.created_at).toLocaleDateString() : '-' }}</span>
+              <span class="value">{{ user?.created_at ? new Date(user.created_at).toLocaleString() : '-' }}</span>
             </div>
           </div>
 

@@ -4257,6 +4257,125 @@ def _create_app() -> Flask:
                 payload["status_counts"] = status_counts
             return jsonify(payload)
 
+    def _semantic_search_candidates(db: Session, keyword: str, limit: int) -> List[Dict[str, Any]]:
+        kw = keyword.strip()
+        if not kw:
+            return []
+        candidates: List[Dict[str, Any]] = []
+        seen: set[tuple[int, str]] = set()
+
+        direct_kps = db.execute(
+            select(KnowledgePoint).where(KnowledgePoint.name.like(f"%{kw}%")).limit(limit)
+        ).scalars().all()
+
+        def add_candidate(kp: KnowledgePoint, path_type: str, reason: str, score: int) -> None:
+            key = (kp.id, path_type)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(
+                {
+                    "knowledge_point_id": kp.id,
+                    "course_id": kp.course_id,
+                    "path_type": path_type,
+                    "search_reason": reason,
+                    "score": score,
+                }
+            )
+
+        for kp in direct_kps:
+            add_candidate(kp, "DIRECT", f"精准匹配知识点[{kp.name}]", 100)
+
+        expanded_section_ids: set[int] = set()
+        for kp in direct_kps:
+            if kp.section_id:
+                expanded_section_ids.add(kp.section_id)
+                same_section = db.execute(
+                    select(KnowledgePoint).where(KnowledgePoint.section_id == kp.section_id).where(KnowledgePoint.id != kp.id)
+                ).scalars().all()
+                for other in same_section:
+                    add_candidate(other, "SAME_SECTION", f"基于同一小节知识点[{kp.name}]的关联检索", 50)
+
+        if len(candidates) < limit:
+            chapter_ids: set[int] = set()
+            for kp in direct_kps:
+                chapter_id = kp.chapter_id or (kp.section.chapter_id if kp.section and kp.section.chapter_id else None)
+                if chapter_id:
+                    chapter_ids.add(chapter_id)
+            for sec_id in expanded_section_ids:
+                sec = db.get(Section, sec_id)
+                if sec and sec.chapter_id:
+                    chapter_ids.add(sec.chapter_id)
+
+            for chapter_id in chapter_ids:
+                same_chapter = db.execute(
+                    select(KnowledgePoint)
+                    .where(KnowledgePoint.chapter_id == chapter_id)
+                    .where(~KnowledgePoint.id.in_([c["knowledge_point_id"]] for c in candidates))
+                ).scalars().all()
+                for other in same_chapter:
+                    add_candidate(other, "SAME_CHAPTER", "基于同一章节的语义扩展检索", 20)
+
+        deduped: Dict[int, Dict[str, Any]] = {}
+        for c in candidates:
+            kid = int(c["knowledge_point_id"])
+            if kid not in deduped or c["score"] > deduped[kid]["score"]:
+                deduped[kid] = c
+        return sorted(deduped.values(), key=lambda x: (-x["score"], x["knowledge_point_id"]))[:limit]
+
+    @app.get("/api/resources/search_semantic")
+    def search_resources_semantic():
+        keyword = (request.args.get("keyword") or "").strip()
+        limit = min(100, max(1, _parse_int(request.args.get("limit")) or 20))
+        if not keyword:
+            return jsonify({"total": 0, "items": []})
+
+        with SessionLocal() as db:
+            user = require_auth(db)
+            current_roles = {r.name for r in user.roles}
+            if not current_roles.intersection({"student", "teacher", "dean", "admin"}):
+                raise ApiError("FORBIDDEN", "Insufficient role", 403)
+
+            candidates = _semantic_search_candidates(db, keyword, limit)
+            if not candidates:
+                return jsonify({"total": 0, "items": []})
+
+            kp_scores: Dict[int, Dict[str, Any]] = {int(c["knowledge_point_id"]): c for c in candidates}
+            resource_map: Dict[int, Dict[str, Any]] = {}
+            resources = (
+                db.execute(
+                    select(Resource)
+                    .join(ResourceKnowledgePoint, ResourceKnowledgePoint.resource_id == Resource.id)
+                    .where(Resource.status == "approved")
+                    .where(ResourceKnowledgePoint.knowledge_point_id.in_(list(kp_scores.keys())))
+                )
+                .scalars()
+                .unique()
+                .all()
+            )
+
+            for res in resources:
+                matched_kps = [rkp.knowledge_point_id for rkp in res.resource_knowledge_points if rkp.knowledge_point_id in kp_scores]
+                if not matched_kps:
+                    continue
+                best = max(kp_scores[kid]["score"] for kid in matched_kps)
+                if res.course_id and any(kp_scores[kid]["course_id"] == res.course_id for kid in matched_kps):
+                    best += 15
+                if res.id not in resource_map or best > resource_map[res.id]["score"]:
+                    reason_parts = []
+                    best_kid = max(matched_kps, key=lambda kid: kp_scores[kid]["score"])
+                    reason_parts.append(kp_scores[best_kid]["search_reason"])
+                    if res.course_id and any(kp_scores[kid]["course_id"] == res.course_id for kid in matched_kps):
+                        reason_parts.append("同课程加权")
+                    resource_map[res.id] = {
+                        **_resource_dto(res),
+                        "score": best,
+                        "search_reason": "，".join(reason_parts),
+                    }
+
+            items = sorted(resource_map.values(), key=lambda x: (-x["score"], x["created_at"] or ""))
+            return jsonify({"total": len(items), "items": items[:limit]})
+
     @app.get("/api/resources/<int:resource_id>")
     def get_resource(resource_id: int):
         with SessionLocal() as db:
@@ -5273,6 +5392,7 @@ def _create_app() -> Flask:
             "username": u.username,
             "roles": [r.name for r in u.roles],
             "phone": u.phone,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
         }
         roles = {r.name for r in u.roles}
         if "student" in roles:

@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts'
@@ -11,7 +11,6 @@ const loading = ref(false)
 const chartEl = ref(null)
 let chart = null
 
-const course = ref('')
 const isFull = ref(false)
 const layout = ref('force') // 'force' or 'circular'
 const graph = ref({ nodes: [], links: [], source: '' })
@@ -25,9 +24,8 @@ async function load() {
   loading.value = true
   try {
     const resp = await api.get('/api/graph/overview', {
-      params: { 
-        course: course.value || undefined, 
-        level: isFull.value ? 'full' : 'departments' 
+      params: {
+        level: isFull.value ? 'full' : 'departments',
       },
     })
     graph.value = resp.data
@@ -198,7 +196,6 @@ onBeforeUnmount(() => {
   chart?.dispose?.()
 })
 
-watch(course, () => load())
 </script>
 
 <template>
@@ -214,14 +211,13 @@ watch(course, () => load())
             </div>
           </div>
           <div class="toolbar-actions graph-actions">
-            <el-input v-model="course" placeholder="课程过滤（可选）" class="graph-input" clearable />
             <el-switch
               v-model="isFull"
               active-text="展示全部"
               inactive-text="基础视图"
               @change="load"
             />
-            
+
             <el-radio-group v-model="layout" size="small" @change="render">
               <el-radio-button label="force">力导向</el-radio-button>
               <el-radio-button label="circular">环形</el-radio-button>
@@ -275,10 +271,6 @@ watch(course, () => load())
 .graph-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
-}
-
-.graph-input {
-  width: 220px;
 }
 
 .graph-canvas {

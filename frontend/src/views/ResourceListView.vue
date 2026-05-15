@@ -29,11 +29,14 @@ const teachers = ref([])
 
 const query = reactive({
   keyword: '',
+  semanticKeyword: '',
   tag: '',
   course_id: null,
   knowledge_point_id: null,
   teacher_id: null,
 })
+
+const searchMode = ref('keyword')
 
 const isAuthed = computed(() => (localStorage.getItem('token') || '').length > 0)
 const roles = computed(() => {
@@ -83,7 +86,7 @@ async function fetchTeachers() {
   }
 }
 
-async function fetchList() {
+async function fetchKeywordList() {
   loading.value = true
   try {
     const resp = await api.get('/api/resources', {
@@ -105,6 +108,37 @@ async function fetchList() {
   } finally {
     loading.value = false
   }
+}
+
+async function fetchSemanticList() {
+  const semanticKeyword = query.semanticKeyword.trim()
+  if (!semanticKeyword) {
+    return fetchKeywordList()
+  }
+  loading.value = true
+  try {
+    const resp = await api.get('/api/resources/search_semantic', {
+      params: {
+        keyword: semanticKeyword,
+        tag: query.tag || undefined,
+        course_id: isNumberValue(query.course_id) ? query.course_id : undefined,
+        knowledge_point_id: isNumberValue(query.knowledge_point_id) ? query.knowledge_point_id : undefined,
+        teacher_id: isNumberValue(query.teacher_id) ? query.teacher_id : undefined,
+        page: pagination.value.page,
+        page_size: pagination.value.pageSize,
+      },
+    })
+    items.value = resp.data.items || []
+    pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '加载失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+function fetchList() {
+  return searchMode.value === 'semantic' ? fetchSemanticList() : fetchKeywordList()
 }
 
 function handlePageChange(page) {
@@ -161,6 +195,7 @@ async function openDetail(item) {
 
 function resetQuery() {
   query.keyword = ''
+  query.semanticKeyword = ''
   query.tag = ''
   query.course_id = null
   query.knowledge_point_id = null
@@ -201,6 +236,14 @@ watch(
   },
 )
 
+watch(
+  () => searchMode.value,
+  () => {
+    pagination.value.page = 1
+    fetchList()
+  },
+)
+
 onMounted(async () => {
   await fetchCourses()
   await fetchTeachers()
@@ -222,16 +265,22 @@ onMounted(async () => {
               <span class="title-hint">搜索、筛选、收藏与下载学习资源</span>
             </div>
           </div>
-          <div class="toolbar-actions">
-            <el-button type="primary" :icon="Search" @click="fetchList">搜索</el-button>
-            <el-button :icon="Refresh" @click="resetQuery">重置</el-button>
+          <div class="search-mode-switch-wrap">
+            <el-segmented
+              v-model="searchMode"
+              :options="[
+                { label: '关键词检索', value: 'keyword' },
+                { label: '语义检索', value: 'semantic' }
+              ]"
+              size="small"
+              class="search-mode-switch"
+            />
           </div>
         </div>
       </template>
 
       <div class="filter-card-soft">
         <div class="filter-grid">
-          <el-input v-model="query.keyword" placeholder="搜索资源标题/描述" :prefix-icon="Search" clearable @change="fetchList" class="filter-item" />
           <el-select v-model="query.course_id" clearable placeholder="所属课程" class="filter-item">
             <template #prefix><el-icon><Reading /></el-icon></template>
             <el-option v-for="c in courses" :key="c.id" :label="c.name" :value="c.id" />
@@ -244,6 +293,20 @@ onMounted(async () => {
             <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
           </el-select>
           <el-input v-model="query.tag" placeholder="标签筛选" :prefix-icon="PriceTag" clearable @change="fetchList" class="filter-item" />
+          <template v-if="searchMode === 'keyword'">
+            <el-input v-model="query.keyword" placeholder="搜索资源标题/描述" :prefix-icon="Search" clearable @change="fetchList" class="filter-item filter-search" />
+            <div class="filter-actions filter-item">
+              <el-button type="primary" :icon="Search" @click="fetchList">搜索</el-button>
+              <el-button :icon="Refresh" @click="resetQuery">重置</el-button>
+            </div>
+          </template>
+          <template v-else>
+            <el-input v-model="query.semanticKeyword" placeholder="输入检索关键词" :prefix-icon="Search" clearable class="filter-item filter-search" />
+            <div class="filter-actions filter-item">
+              <el-button type="primary" :icon="Search" @click="fetchList">语义检索</el-button>
+              <el-button :icon="Refresh" @click="resetQuery">重置</el-button>
+            </div>
+          </template>
         </div>
 
         <div v-if="isDean" class="status-tabs">
@@ -256,7 +319,7 @@ onMounted(async () => {
       </div>
 
       <div v-loading="loading" class="resource-grid">
-        <el-empty v-if="items.length === 0" description="暂无符合条件的资源" />
+        <el-empty v-if="items.length === 0" :description="searchMode === 'semantic' && query.semanticKeyword?.trim() ? '未找到相关语义资源' : '暂无符合条件的资源'" />
 
         <div class="resource-card-grid">
           <el-tooltip v-for="item in items" :key="item.id" :content="item.file_name || item.title" placement="top" :show-after="350" effect="dark">
@@ -287,6 +350,11 @@ onMounted(async () => {
                   <el-tag v-for="t in (item.tags || []).slice(0, 3)" :key="t" size="small" effect="plain">
                     {{ t }}
                   </el-tag>
+                </div>
+
+                <div v-if="item.search_reason" class="search-reason">
+                  <span class="search-reason__label">检索理由</span>
+                  <span class="search-reason__text">{{ item.search_reason }}</span>
                 </div>
 
                 <div class="resource-footer">
@@ -342,16 +410,151 @@ onMounted(async () => {
   background: #fff;
 }
 
+.search-module-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+.search-module-card {
+  position: relative;
+  padding: 18px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.54));
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  box-shadow:
+    0 18px 44px rgba(39, 65, 118, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  overflow: hidden;
+}
+
+.search-module-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at top right, rgba(95, 129, 255, 0.16), transparent 42%);
+  pointer-events: none;
+}
+
+.search-module-header {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.search-module-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--app-text);
+}
+
+.search-module-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+.semantic-panel {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.semantic-summary {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(69, 100, 245, 0.08);
+  color: #4564f5;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid rgba(69, 100, 245, 0.10);
+}
+
+.semantic-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
 .filter-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 16px;
+  grid-template-columns: 1fr 1fr 0.9fr 0.9fr 1.5fr auto;
+  gap: 14px;
   align-items: center;
+}
+
+.filter-item {
+  min-width: 0;
+}
+
+.filter-search {
+  grid-column: auto;
 }
 
 .filter-actions {
   display: flex;
   gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.resource-toolbar {
+  align-items: center;
+  gap: 16px;
+}
+
+.search-mode-switch-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 208px;
+}
+
+.search-mode-switch {
+  width: 100%;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  box-shadow:
+    0 10px 28px rgba(39, 65, 118, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.search-mode-switch :deep(.el-segmented__group) {
+  width: 100%;
+}
+
+.search-mode-switch :deep(.el-segmented__item) {
+  min-height: 30px;
+  padding: 0 10px;
+  font-weight: 700;
+  border-radius: 999px;
+  transition: all 0.2s ease;
+  font-size: 12px;
+}
+
+.search-mode-switch :deep(.el-segmented__item.is-selected) {
+  color: #fff;
+  background: linear-gradient(135deg, rgba(95, 129, 255, 0.96), rgba(69, 100, 245, 0.96));
+  box-shadow: 0 10px 22px rgba(69, 100, 245, 0.22);
+}
+
+.search-mode-switch :deep(.el-segmented__item:not(.is-selected)) {
+  color: var(--app-text-secondary);
 }
 
 .status-tabs {
@@ -433,6 +636,7 @@ onMounted(async () => {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
 }
 
@@ -443,6 +647,27 @@ onMounted(async () => {
   min-height: 18px;
   max-height: 36px;
   overflow: hidden;
+}
+
+.search-reason {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(69, 100, 245, 0.06);
+}
+
+.search-reason__label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #4564f5;
+}
+
+.search-reason__text {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #606266;
 }
 
 .resource-footer {
@@ -477,8 +702,48 @@ onMounted(async () => {
 }
 
 @media (max-width: 768px) {
-  .filter-grid {
+  .search-module-grid,
+  .filter-grid,
+  .semantic-input-row {
     grid-template-columns: 1fr;
+  }
+
+  .search-module-card {
+    padding: 16px;
+    border-radius: 18px;
+  }
+
+  .search-module-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .search-mode-switch-wrap {
+    width: 100%;
+    min-width: 0;
+    align-items: stretch;
+  }
+
+  .search-mode-switch {
+    justify-self: stretch;
+  }
+
+  .search-mode-switch :deep(.el-segmented__item) {
+    min-height: 28px;
+    padding: 0 8px;
+  }
+
+  .filter-search {
+    grid-column: auto;
+  }
+
+  .filter-actions {
+    justify-content: stretch;
+    flex-wrap: wrap;
+  }
+
+  .filter-actions .el-button {
+    flex: 1;
   }
 
   .resource-card-grid {
