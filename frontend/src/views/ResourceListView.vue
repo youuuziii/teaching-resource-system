@@ -128,6 +128,7 @@ async function fetchSemanticList() {
         page_size: pagination.value.pageSize,
       },
     })
+    console.log('[semantic search response]', resp.data)
     items.value = resp.data.items || []
     pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
   } catch (e) {
@@ -301,7 +302,14 @@ onMounted(async () => {
             </div>
           </template>
           <template v-else>
-            <el-input v-model="query.semanticKeyword" placeholder="输入检索关键词" :prefix-icon="Search" clearable class="filter-item filter-search" />
+            <el-input 
+              v-model="query.semanticKeyword" 
+              placeholder="输入检索关键词" 
+              :prefix-icon="Search" 
+              clearable 
+              class="filter-item filter-search"
+              @keyup.enter="fetchList"
+            />
             <div class="filter-actions filter-item">
               <el-button type="primary" :icon="Search" @click="fetchList">语义检索</el-button>
               <el-button :icon="Refresh" @click="resetQuery">重置</el-button>

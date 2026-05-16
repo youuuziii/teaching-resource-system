@@ -52,7 +52,7 @@ const pageOptions = ref([])
 
 const PAGE_GROUPS = [
   { title: '基础页面', paths: ['/', '/graph', '/profile'] },
-  { title: '学习与教学', paths: ['/learning', '/teacher/courses', '/teacher/kp-relations'] },
+  { title: '学习与教学', paths: ['/learning', '/teacher/courses'] },
   { title: '管理后台', paths: ['/admin/audit', '/admin/courses', '/admin/logs', '/admin/users'] },
 ]
 
@@ -532,7 +532,7 @@ onMounted(async () => {
     </el-dialog>
 
     <!-- Role Permissions Dialog -->
-    <el-dialog v-model="roleEditOpen" title="配置角色页面" width="760px">
+    <el-dialog v-model="roleEditOpen" title="配置角色权限" width="760px">
       <el-form :model="roleEditForm" label-position="top">
         <el-form-item label="正在编辑的角色">
           <el-tag effect="dark" type="warning">{{ roleEditForm.name }}</el-tag>

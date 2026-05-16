@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Connection } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import api from '../api/client'
 
@@ -204,7 +205,7 @@ onBeforeUnmount(() => {
       <template #header>
         <div class="page-toolbar graph-toolbar">
           <div class="page-toolbar__title title-section">
-            <el-icon :size="22" class="title-icon"><Share /></el-icon>
+            <el-icon :size="22" class="title-icon"><Connection /></el-icon>
             <div class="title-block">
               <span class="title">知识图谱</span>
               <span class="title-hint">探索课程、知识点与资源之间的关联网络</span>

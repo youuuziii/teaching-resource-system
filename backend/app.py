@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -348,6 +349,7 @@ class Resource(Base):
     file_path: Mapped[str] = mapped_column(String(600), nullable=False)
     file_type: Mapped[str] = mapped_column(String(16), nullable=False)
     file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    file_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id"), nullable=True)
     chapter_id: Mapped[Optional[int]] = mapped_column(ForeignKey("chapters.id"), nullable=True)
     section_id: Mapped[Optional[int]] = mapped_column(ForeignKey("sections.id"), nullable=True)
@@ -1035,7 +1037,7 @@ def _create_app() -> Flask:
 
         return raw_candidates
 
-    def _process_resource_pipeline(res: Resource, db: Session) -> None:
+    def _process_resource_pipeline(res: Resource, db: Session, dry_run: bool = False) -> None:
         """
         增强版自动化数据处理流程：
         1. 系统梳理数据来源，对收集的多源异构数据进行清洗、去重、格式标准化
@@ -1048,7 +1050,7 @@ def _create_app() -> Flask:
         from io import BytesIO
         import traceback
 
-        print(f"[*] Starting pipeline for resource: {res.file_name} (ID: {res.id})")
+        print(f"[*] Starting pipeline for resource: {res.file_name} (ID: {res.id}), dry_run={dry_run}")
         if not res.file_path or not os.path.exists(res.file_path):
             print(f"[!] File path not found: {res.file_path}")
             return
@@ -1119,10 +1121,28 @@ def _create_app() -> Flask:
         cleaned_text = clean_standardize(raw_text)
 
         # --- 步骤 3: 自动实体识别与知识图谱构建 (NER & RE) ---
-        # 1. 如果资源未关联知识点，尝试从文件名或内容中抽取关键词作为知识点
-        file_base = Path(res.file_name).stem
-        if not res.knowledge_point_id and not res.knowledge_point_name:
-            print(f"[*] Identifying entity for: {file_base}")
+        # 1. 优先处理教师手动填写/批量提交的知识点，再补充自动抽取结果
+        # 如果 res.knowledge_point_name 不为 None，说明已经过人工编辑或初步识别，直接信任
+        is_manual_mode = res.knowledge_point_name is not None
+        extracted_entities = []
+        if is_manual_mode:
+            # 支持多种分隔符：英文逗号、中文逗号、顿号
+            extracted_entities = [n.strip() for n in re.split(r"[,，、]", res.knowledge_point_name) if n.strip()]
+            print(f"[*] Manual mode: Using existing knowledge points: {extracted_entities}")
+
+        # 无论是否手动模式，都尝试获取 course 对象作为上下文
+        course = res.course
+        if not course and res.course_id:
+            try:
+                course = db.get(Course, res.course_id)
+                if course:
+                    res.course = course
+            except Exception:
+                course = None
+
+        if not is_manual_mode:
+            file_base = Path(res.file_name).stem
+            print(f"[*] Identification mode: Identifying entity for: {file_base}")
             # --- 阶段1: 预处理 (Preprocessing) ---
             # 1.1 仅剔除日期、版本、括号内容，保留核心文本以维持分词上下文
             clean_name = re.sub(r"\[.*?\]|（.*?）|\(.*?\)|《|》", "", file_base)
@@ -1151,10 +1171,12 @@ def _create_app() -> Flask:
 
             # --- 阶段2: 分词干预 (Tokenization Tuning) ---
             whitelist = []
-            course = res.course
             if course:
                 # 显式加载关联数据
-                db.refresh(course)
+                try:
+                    db.refresh(course)
+                except Exception:
+                    pass
                 whitelist.append(course.name)
                 for chap in course.chapters:
                     whitelist.append(chap.name)
@@ -1258,23 +1280,26 @@ def _create_app() -> Flask:
 
             # 排序：根据在原文件名中出现的顺序排序，确保第一个提到的实体作为主实体
             extracted_entities.sort(key=lambda x: clean_name.find(x) if x in clean_name else 999)
+        else:
+            # 手动模式下跳过识别步骤，直接进入后续校验与关联阶段
+            print(f"[*] Manual mode: Processing {len(extracted_entities)} entities for {res.file_name}")
 
-            # --- 阶段5: 外部知识库校验 (External Validation) & 图谱关联 ---
-            final_kp_ids = []
-            final_kp_names = []
-            
-            # 获取学科领域作为上下文
-            discipline_name = ""
-            if course:
-                try:
-                    from sqlalchemy.orm import selectinload
-                    stmt = select(Course).where(Course.id == res.course_id).options(
-                        selectinload(Course.course_majors).selectinload(CourseMajor.major)
-                    )
-                    course_with_major = db.execute(stmt).scalar_one_or_none()
-                    if course_with_major and course_with_major.course_majors:
-                        discipline_name = course_with_major.course_majors[0].major.name
-                except Exception: pass
+        # --- 阶段5: 外部知识库校验 (External Validation) & 图谱关联 ---
+        final_kp_ids = []
+        final_kp_names = []
+        
+        # 获取学科领域作为上下文
+        discipline_name = ""
+        if course:
+            try:
+                from sqlalchemy.orm import selectinload
+                stmt = select(Course).where(Course.id == res.course_id).options(
+                    selectinload(Course.course_majors).selectinload(CourseMajor.major)
+                )
+                course_with_major = db.execute(stmt).scalar_one_or_none()
+                if course_with_major and course_with_major.course_majors:
+                    discipline_name = course_with_major.course_majors[0].major.name
+            except Exception: pass
 
             current_dir_name = ""
             current_chapter_name = ""
@@ -1303,20 +1328,28 @@ def _create_app() -> Flask:
             section_name_key = _compact_name(current_section_name)
 
             for entity in extracted_entities:
-                # 0. 实体归一化：优先使用本地词库的映射关系 (解决 IR -> 指令寄存器等简称问题)
-                target_kp_name = discipline_dict.get(entity, entity)
+                # 0. 实体归一化
+                # 如果是手动模式（教师编辑过），我们直接信任教师填写的名称，不进行归一化和 LLM 校验
+                if is_manual_mode:
+                    target_kp_name = entity
+                    print(f"[*] Manual mode: Processing entity '{target_kp_name}'")
+                else:
+                    # 自动识别模式下的归一化逻辑
+                    target_kp_name = discipline_dict.get(entity, entity)
+                
                 entity_key = _compact_name(target_kp_name)
 
                 # 0.1 如果提取结果与当前章节/小节一致，则直接挂载到目录，不创建同名知识点
-                if current_section_name and entity_key and entity_key == section_name_key:
-                    print(f"[*] Entity '{entity}' matched current section '{current_section_name}', binding resource directly to section.")
-                    res.section_id = res.section_id or (res.section.id if res.section else None)
-                    continue
-                if current_chapter_name and entity_key and entity_key == chapter_name_key:
-                    print(f"[*] Entity '{entity}' matched current chapter '{current_chapter_name}', binding resource directly to chapter.")
-                    res.chapter_id = res.chapter_id or (res.chapter.id if res.chapter else None)
-                    res.section_id = None
-                    continue
+                if not is_manual_mode: # 手动模式下不进行此类自动拦截
+                    if current_section_name and entity_key and entity_key == section_name_key:
+                        print(f"[*] Entity '{entity}' matched current section '{current_section_name}', binding resource directly to section.")
+                        res.section_id = res.section_id or (res.section.id if res.section else None)
+                        continue
+                    if current_chapter_name and entity_key and entity_key == chapter_name_key:
+                        print(f"[*] Entity '{entity}' matched current chapter '{current_chapter_name}', binding resource directly to chapter.")
+                        res.chapter_id = res.chapter_id or (res.chapter.id if res.chapter else None)
+                        res.section_id = None
+                        continue
 
                 existing_kp = None
                 
@@ -1328,7 +1361,7 @@ def _create_app() -> Flask:
                 if existing_kp:
                     # 更新 target_kp_name 为数据库中实际存储的名称
                     target_kp_name = existing_kp.name
-                else:
+                elif not is_manual_mode:
                     # 2. 快速通行证：检查原始实体或归一化词是否在本地学科词库中
                     is_discipline_word = (entity in discipline_dict or target_kp_name in discipline_dict)
                     
@@ -1383,6 +1416,11 @@ def _create_app() -> Flask:
                             print(f"[*] Skip creating KP '{target_kp_name}' because it matches the current directory; resource will bind to directory directly.")
                             continue
 
+                        if dry_run:
+                            print(f"[*] dry_run: Skipping creation of new KP '{target_kp_name}'")
+                            final_kp_names.append(target_kp_name)
+                            continue
+
                         new_kp = KnowledgePoint(
                             name=target_kp_name,
                             course_id=res.course_id,
@@ -1399,70 +1437,73 @@ def _create_app() -> Flask:
                     if existing_kp.id not in final_kp_ids:
                         final_kp_ids.append(existing_kp.id)
                         final_kp_names.append(existing_kp.name)
-                        rkp_exists = any(rkp.knowledge_point_id == existing_kp.id for rkp in res.resource_knowledge_points)
-                        if not rkp_exists:
-                            res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=existing_kp.id))
+                        if not dry_run:
+                            rkp_exists = any(rkp.knowledge_point_id == existing_kp.id for rkp in res.resource_knowledge_points)
+                            if not rkp_exists:
+                                res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=existing_kp.id))
                 except Exception as e:
                     print(f"[!] Error associating KP '{target_kp_name}': {e}")
 
             # --- 阶段6: 结果收敛与兜底 ---
             if final_kp_ids:
-                res.knowledge_point_id = final_kp_ids[0]
-                res.knowledge_point_name = ", ".join(final_kp_names)
+                if not res.knowledge_point_id and not dry_run:
+                    res.knowledge_point_id = final_kp_ids[0]
+                # 仅在当前没有知识点名称时才更新，保护教师手动编辑的结果
+                if final_kp_names and not res.knowledge_point_name:
+                    res.knowledge_point_name = ", ".join(final_kp_names)
             else:
                 # 最终兜底：关联到当前目录代表的知识点
-                target_kp = None
-                if res.section_id:
-                    target_kp = db.execute(
-                        select(KnowledgePoint).where(KnowledgePoint.section_id == res.section_id)
-                    ).scalars().first()
-                if not target_kp and res.chapter_id:
-                    target_kp = db.execute(
-                        select(KnowledgePoint).where(
-                            KnowledgePoint.chapter_id == res.chapter_id,
-                            KnowledgePoint.section_id.is_(None),
-                        )
-                    ).scalars().first()
-                
-                if target_kp:
-                    res.knowledge_point_id = target_kp.id
-                    res.knowledge_point_name = target_kp.name
-                    exists = any(rkp.knowledge_point_id == target_kp.id for rkp in res.resource_knowledge_points)
-                    if not exists:
-                        res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=target_kp.id))
-                elif course:
-                    # 如果实在找不到，显示目录名称或课程名称
-                    res.knowledge_point_name = current_dir_name or course.name
+                # 如果是手动模式且教师清空了知识点，我们不再进行兜底识别
+                if is_manual_mode:
+                    print("[*] Manual mode: Knowledge points cleared by teacher, skipping fallback.")
+                else:
+                    target_kp = None
+                    if res.section_id:
+                        target_kp = db.execute(
+                            select(KnowledgePoint).where(KnowledgePoint.section_id == res.section_id)
+                        ).scalars().first()
+                    if not target_kp and res.chapter_id:
+                        target_kp = db.execute(
+                            select(KnowledgePoint).where(
+                                KnowledgePoint.chapter_id == res.chapter_id,
+                                KnowledgePoint.section_id.is_(None),
+                            )
+                        ).scalars().first()
+                    
+                    if target_kp:
+                        if not dry_run:
+                            res.knowledge_point_id = target_kp.id
+                            # 仅在当前没有知识点名称时才更新
+                            if not res.knowledge_point_name:
+                                res.knowledge_point_name = target_kp.name
+                            exists = any(rkp.knowledge_point_id == target_kp.id for rkp in res.resource_knowledge_points)
+                            if not exists:
+                                res.resource_knowledge_points.append(ResourceKnowledgePoint(knowledge_point_id=target_kp.id))
+                        if target_kp.id not in final_kp_ids:
+                            final_kp_ids.append(target_kp.id)
+                            final_kp_names.append(target_kp.name)
+                    elif course and not res.knowledge_point_name:
+                        # 如果实在找不到且当前没有知识点名称，显示目录名称或课程名称
+                        res.knowledge_point_name = current_dir_name or course.name
 
         # 2. 实体识别 (NER)：识别文中提及的其他已有知识点
         try:
-            all_kps = db.execute(
-                select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id)
-            ).scalars().all()
+            if dry_run:
+                print("[*] dry_run: Skipping NER/RE and tag associations")
+            else:
+                all_kps = db.execute(
+                    select(KnowledgePoint).where(KnowledgePoint.course_id == res.course_id)
+                ).scalars().all()
 
-            # 3. 关系抽取 (RE)：建立 MENTIONS 关系并同步到 Neo4j
-            # 注意：上传阶段不再直接同步到 Neo4j，等待管理员审核通过后同步
-            for kp in all_kps:
-                # 如果文中提及了其他知识点，建立关联
-                if kp.name in cleaned_text and kp.name != res.knowledge_point_name:
-                    # if neo4j_driver:
-                    #     try:
-                    #         with neo4j_driver.session() as session:
-                    #             session.run(
-                    #                 """
-                    #                 MATCH (k1:KnowledgePoint {name: $kp1})
-                    #                 MATCH (k2:KnowledgePoint {name: $kp2})
-                    #                 MERGE (k1)-[r:MENTIONS]->(k2)
-                    #                 SET r.source_resource = $res_title
-                    #                 """,
-                    #                 {"kp1": res.knowledge_point_name, "kp2": kp.name, "res_title": res.title}
-                    #             )
-                    #     except Exception:
-                    #         pass
-                    
-                    # 为资源打上对应的知识点标签
-                    if kp.name not in [t.tag for t in res.tags]:
-                        res.tags.append(ResourceTag(tag=kp.name))
+                # 3. 关系抽取 (RE)：建立 MENTIONS 关系并同步到 Neo4j
+                # 注意：上传阶段不再直接同步到 Neo4j，等待管理员审核通过后同步
+                kp_names_set = set(extracted_entities)
+                for kp in all_kps:
+                    # 如果文中提及了其他知识点，建立关联
+                    if kp.name in cleaned_text and kp.name not in kp_names_set:
+                        # 为资源打上对应的知识点标签
+                        if kp.name not in [t.tag for t in res.tags]:
+                            res.tags.append(ResourceTag(tag=kp.name))
         except Exception as e:
             print(f"[!] NER/RE error: {e}")
             traceback.print_exc()
@@ -3695,10 +3736,22 @@ def _create_app() -> Flask:
             if suffix not in allowed_extensions:
                 raise ApiError("BAD_REQUEST", f"仅支持上传 {', '.join([ext.lstrip('.') for ext in allowed_extensions])} 格式文件", 400)
 
+            file_bytes = f.read()
+            if not file_bytes:
+                raise ApiError("BAD_REQUEST", "empty file uploaded", 400)
+            current_hash = hashlib.sha256(file_bytes).hexdigest()
+            existing_resource = db.execute(
+                select(Resource)
+                .where(Resource.file_hash == current_hash)
+                .where(Resource.status != "rejected")
+            ).scalar_one_or_none()
+            if existing_resource:
+                raise ApiError("BAD_REQUEST", "系统检测到该教学资源已被上传过，请勿重复上传！", 400)
+
             file_id = str(uuid.uuid4())
             safe_name = f"{file_id}{suffix}"
             dest_path = settings.upload_dir / safe_name
-            f.save(dest_path)
+            dest_path.write_bytes(file_bytes)
 
             course_obj = db.get(Course, course_id)
             if not course_obj:
@@ -3749,7 +3802,8 @@ def _create_app() -> Flask:
                 file_name=original_name,
                 file_path=str(dest_path),
                 file_type=suffix.lstrip("."),
-                file_size=dest_path.stat().st_size if dest_path.exists() else None,
+                file_size=len(file_bytes),
+                file_hash=current_hash,
                 course_id=course_obj.id if course_obj else None,
                 chapter_id=chapter_obj.id if chapter_obj else None,
                 section_id=section_obj.id if section_obj else None,
@@ -3764,7 +3818,8 @@ def _create_app() -> Flask:
             db.add(res)
             db.flush()
 
-            _process_resource_pipeline(res, db)
+            # 上传阶段仅进行干跑 (dry_run)，识别知识点但不创建数据库记录
+            _process_resource_pipeline(res, db, dry_run=True)
 
             tags = _split_tags(tags_raw)
             for t in tags:
@@ -3808,6 +3863,9 @@ def _create_app() -> Flask:
                 res.audited_by = user.id
                 res.audited_at = now
                 
+                # 审核通过时，正式运行处理流水线，同步知识点到数据库
+                _process_resource_pipeline(res, db, dry_run=False)
+                
                 # Sync with Neo4j
                 # 审核通过时，同步关联的所有知识点到 Neo4j
                 for rkp in res.resource_knowledge_points:
@@ -3839,9 +3897,9 @@ def _create_app() -> Flask:
                 course_id = _parse_int(request.form.get("course_id"))
                 chapter_id = _parse_int(request.form.get("chapter_id"))
                 section_id = _parse_int(request.form.get("section_id"))
-                
-                print(f"[*] Batch upload request: course_id={course_id}, chapter_id={chapter_id}, section_id={section_id}")
-                
+
+                print(f"[*] Batch process request: course_id={course_id}, chapter_id={chapter_id}, section_id={section_id}")
+
                 if course_id is None:
                     raise ApiError("BAD_REQUEST", "course_id is required", 400)
 
@@ -3866,10 +3924,6 @@ def _create_app() -> Flask:
                 if not chapter_obj or not section_obj:
                     raise ApiError("BAD_REQUEST", "必须同时选择章节和小节，资源只能上传到小节层", 400)
 
-                trow = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
-                if not trow:
-                    raise ApiError("FORBIDDEN", "teacher profile not found", 403)
-
                 files = request.files.getlist("files")
                 print(f"[*] Files received: {len(files)}")
                 if not files:
@@ -3878,15 +3932,12 @@ def _create_app() -> Flask:
                 results = []
                 allowed_extensions = {".docx", ".pdf", ".ppt", ".pptx", ".xlsx", ".txt"}
                 for f in files:
-                    # 使用 savepoint (nested transaction) 确保单个文件失败不影响整个批次
-                    sp = db.begin_nested()
                     try:
                         original_name = (f.filename or "upload").strip()
                         print(f"[*] Processing file: {original_name}")
                         suffix = Path(original_name).suffix.lower()
                         if suffix not in allowed_extensions:
                             results.append({"filename": original_name, "status": "error", "message": f"仅支持上传 {', '.join([ext.lstrip('.') for ext in allowed_extensions])} 格式文件"})
-                            sp.rollback()
                             continue
 
                         file_id = str(uuid.uuid4())
@@ -3895,7 +3946,7 @@ def _create_app() -> Flask:
                         f.save(str(dest_path))
                         print(f"[*] Saved to: {dest_path}")
 
-                        res = Resource(
+                        dummy_res = Resource(
                             title=Path(original_name).stem,
                             file_name=original_name,
                             file_path=str(dest_path),
@@ -3910,45 +3961,131 @@ def _create_app() -> Flask:
                             created_by=user.id,
                             status="pending",
                         )
-                        db.add(res)
-                        db.flush()
+                        _process_resource_pipeline(dummy_res, db, dry_run=True)
 
-                        _process_resource_pipeline(res, db)
-
-                        res.resource_teachers.append(ResourceTeacher(teacher_id=trow.teacher_id))
                         results.append({
                             "filename": original_name,
                             "status": "success",
-                            "kp": res.knowledge_point_name,
-                            "chapter": res.chapter_name,
-                            "section": res.section_name,
-                            "suggestion": res.suggestion,
-                            "id": res.id
+                            "kp": dummy_res.knowledge_point_name,
+                            "kp_items": [x.strip() for x in (dummy_res.knowledge_point_name or "").split(",") if x.strip()],
+                            "chapter": dummy_res.chapter_name,
+                            "section": dummy_res.section_name,
+                            "file_path": str(dest_path),
+                            "file_type": suffix.lstrip("."),
+                            "file_size": dest_path.stat().st_size if dest_path.exists() else None,
+                            "title": dummy_res.title,
+                            "description": dummy_res.description,
                         })
-                        sp.commit()
                     except Exception as fe:
-                        sp.rollback()
                         print(f"[!] Error processing individual file {f.filename}: {fe}")
                         traceback.print_exc()
                         results.append({"filename": f.filename, "status": "error", "message": str(fe)})
 
-                deans = db.execute(select(User).join(User.roles).where(Role.name == "dean")).scalars().all()
-                for dean in deans:
-                    db.add(Notification(
-                        user_id=dean.id,
-                        title="批量资源待审核",
-                        content=f"教师 {user.username} 批量上传了 {len(files)} 份资源，请及时审核。",
-                        type="audit_pending"
-                    ))
-
-                db.commit()
-                return jsonify({"results": results})
+                return jsonify({"results": results, "course_id": course_obj.id, "chapter_id": chapter_obj.id, "section_id": section_obj.id})
             except ApiError as e:
                 raise e
             except Exception as e:
                 print(f"[!] Critical error in batch_upload_resources: {e}")
                 traceback.print_exc()
                 raise ApiError("INTERNAL_ERROR", f"批量处理过程中发生异常: {str(e)}", 500)
+
+    @app.post("/api/resources/batch-upload/submit")
+    def submit_processed_batch_resources():
+        data = _json()
+        course_id = _parse_int(data.get("course_id"))
+        chapter_id = _parse_int(data.get("chapter_id"))
+        section_id = _parse_int(data.get("section_id"))
+        results = data.get("results")
+
+        if course_id is None or chapter_id is None or section_id is None:
+            raise ApiError("BAD_REQUEST", "course_id, chapter_id and section_id are required", 400)
+        if not isinstance(results, list) or not results:
+            raise ApiError("BAD_REQUEST", "results is required", 400)
+
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"teacher"})
+
+            course_obj = db.get(Course, course_id)
+            chapter_obj = db.get(Chapter, chapter_id)
+            section_obj = db.get(Section, section_id)
+            if not course_obj or not chapter_obj or not section_obj:
+                raise ApiError("NOT_FOUND", "course/chapter/section not found", 404)
+            if chapter_obj.course_id != course_obj.id or section_obj.chapter_id != chapter_obj.id:
+                raise ApiError("FORBIDDEN", "invalid course structure", 403)
+
+            trow = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
+            if not trow:
+                raise ApiError("FORBIDDEN", "teacher profile not found", 403)
+
+            created_count = 0
+            for row in results:
+                if not isinstance(row, dict) or row.get("status") != "success":
+                    continue
+                file_path = row.get("file_path")
+                if not file_path:
+                    continue
+                original_name = (row.get("filename") or Path(file_path).name or "upload").strip()
+                path_obj = Path(file_path)
+                if not path_obj.exists():
+                    raise ApiError("BAD_REQUEST", f"file not found: {original_name}", 400)
+                file_bytes = path_obj.read_bytes()
+                if not file_bytes:
+                    raise ApiError("BAD_REQUEST", f"empty file: {original_name}", 400)
+                current_hash = hashlib.sha256(file_bytes).hexdigest()
+                existing_resource = db.execute(
+                    select(Resource)
+                    .where(Resource.file_hash == current_hash)
+                    .where(Resource.status != "rejected")
+                ).scalar_one_or_none()
+                if existing_resource:
+                    raise ApiError("BAD_REQUEST", "系统检测到该教学资源已被上传过，请勿重复上传！", 400)
+
+                res = Resource(
+                    title=(row.get("title") or Path(original_name).stem).strip() or Path(original_name).stem,
+                    file_name=original_name,
+                    file_path=file_path,
+                    file_type=row.get("file_type") or Path(file_path).suffix.lstrip("."),
+                    file_size=row.get("file_size") or len(file_bytes),
+                    file_hash=current_hash,
+                    course_id=course_obj.id,
+                    chapter_id=chapter_obj.id,
+                    section_id=section_obj.id,
+                    course_name=course_obj.name,
+                    chapter_name=chapter_obj.name,
+                    section_name=section_obj.name,
+                    created_by=user.id,
+                    status="pending",
+                    description=row.get("description"),
+                )
+                db.add(res)
+                db.flush()
+
+                kp_text = row.get("kp") or ""
+                # 支持多种分隔符：英文逗号、中文逗号、顿号
+                kp_names = [x.strip() for x in re.split(r"[,，、]", str(kp_text)) if x.strip()]
+                if kp_names:
+                    res.knowledge_point_name = ", ".join(kp_names)
+                else:
+                    # 使用空字符串而不是 None，表示已经过人工确认/处理（即使为空）
+                    res.knowledge_point_name = ""
+                
+                # 批量提交阶段仅进行干跑 (dry_run)，识别结果暂存于 knowledge_point_name
+                _process_resource_pipeline(res, db, dry_run=True)
+                res.resource_teachers.append(ResourceTeacher(teacher_id=trow.teacher_id))
+                created_count += 1
+
+            deans = db.execute(select(User).join(User.roles).where(Role.name == "dean")).scalars().all()
+            for dean in deans:
+                db.add(Notification(
+                    user_id=dean.id,
+                    title="批量资源待审核",
+                    content=f"教师 {user.username} 批量提交了 {created_count} 份处理后的资源，请及时审核。",
+                    type="audit_pending"
+                ))
+
+            db.commit()
+            return jsonify({"ok": True, "created_count": created_count})
 
     @app.post("/api/resources/<int:resource_id>/apply-suggestion")
     def apply_resource_suggestion(resource_id: int):
@@ -4326,9 +4463,11 @@ def _create_app() -> Flask:
     @app.get("/api/resources/search_semantic")
     def search_resources_semantic():
         keyword = (request.args.get("keyword") or "").strip()
-        limit = min(100, max(1, _parse_int(request.args.get("limit")) or 20))
+        page = max(1, _parse_int(request.args.get("page")) or 1)
+        page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 10))
+        limit = min(1000, max(1, _parse_int(request.args.get("limit")) or 200))
         if not keyword:
-            return jsonify({"total": 0, "items": []})
+            return jsonify({"total": 0, "items": [], "page": page, "page_size": page_size})
 
         with SessionLocal() as db:
             user = require_auth(db)
@@ -4338,7 +4477,7 @@ def _create_app() -> Flask:
 
             candidates = _semantic_search_candidates(db, keyword, limit)
             if not candidates:
-                return jsonify({"total": 0, "items": []})
+                return jsonify({"total": 0, "items": [], "page": page, "page_size": page_size})
 
             kp_scores: Dict[int, Dict[str, Any]] = {int(c["knowledge_point_id"]): c for c in candidates}
             resource_map: Dict[int, Dict[str, Any]] = {}
@@ -4374,7 +4513,12 @@ def _create_app() -> Flask:
                     }
 
             items = sorted(resource_map.values(), key=lambda x: (-x["score"], x["created_at"] or ""))
-            return jsonify({"total": len(items), "items": items[:limit]})
+            total = len(items)
+            start = (page - 1) * page_size
+            end = start + page_size
+            page_items = items[start:end]
+            print(f"[search] semantic route=search_resources_semantic total={total}, page={page}, page_size={page_size}, slice={start}:{end}, returned={len(page_items)}")
+            return jsonify({"total": total, "items": page_items, "page": page, "page_size": page_size})
 
     @app.get("/api/resources/<int:resource_id>")
     def get_resource(resource_id: int):
@@ -4771,6 +4915,9 @@ def _create_app() -> Flask:
             res.audited_at = dt.datetime.now(dt.UTC)
 
             if res.status == "approved":
+                # 审核通过时，正式运行处理流水线，同步知识点到数据库
+                _process_resource_pipeline(res, db, dry_run=False)
+                
                 # 审核通过时，同步关联的所有知识点到 Neo4j
                 for rkp in res.resource_knowledge_points:
                     if rkp.knowledge_point:
@@ -4904,12 +5051,24 @@ def _create_app() -> Flask:
             db.refresh(res)
             return jsonify({"resource": _resource_dto(res)})
 
+    def _search_paginate(items: List[Resource], page: int, page_size: int):
+        total = len(items)
+        start = (page - 1) * page_size
+        end = start + page_size
+        print(f"[search] paginate page={page}, page_size={page_size}, total={total}, start={start}, end={end}")
+        return items[start:end], total
+
+    @app.get("/api/resources/search_semantic")
     @app.get("/api/search")
     def semantic_search():
         keyword = (request.args.get("keyword") or "").strip()
-        knowledge = (request.args.get("knowledge") or "").strip()
+        knowledge = (request.args.get("knowledge") or request.args.get("semanticKeyword") or "").strip()
         course_id = _parse_int(request.args.get("course_id"))
         knowledge_point_id = _parse_int(request.args.get("knowledge_point_id"))
+        page = _parse_int(request.args.get("page")) or 1
+        page_size = _parse_int(request.args.get("page_size")) or 10
+        page = max(page, 1)
+        page_size = max(1, min(page_size, 100))
 
         with SessionLocal() as db:
             current = get_current_user(db)
@@ -4929,15 +5088,11 @@ def _create_app() -> Flask:
 
             related_resource_ids: Optional[set[int]] = None
             paths_by_id: Dict[int, List[str]] = {}
-            neo4j_error = False
             if knowledge and neo4j_driver:
                 try:
                     paths_by_id = _neo4j_search_resource_paths(neo4j_driver, knowledge)
-                    related_resource_ids = set(paths_by_id.keys())
-                    if not related_resource_ids:
-                        related_resource_ids = None
+                    related_resource_ids = set(paths_by_id.keys()) or None
                 except Exception:
-                    neo4j_error = True
                     related_resource_ids = None
                     paths_by_id = {}
 
@@ -4951,8 +5106,14 @@ def _create_app() -> Flask:
                     or (r.knowledge_point_name == knowledge)
                 ]
 
+            all_items = list(items)
+            total = len(all_items)
+            start = (page - 1) * page_size
+            end = start + page_size
+            page_items = all_items[start:end]
+            print(f"[search] semantic total={total}, page={page}, page_size={page_size}, slice={start}:{end}, returned={len(page_items)}")
             out_items = []
-            for r in items:
+            for r in page_items:
                 reasons: List[str] = []
                 if keyword:
                     kw = keyword.lower()
@@ -4968,15 +5129,17 @@ def _create_app() -> Flask:
                     reasons.append("课程过滤匹配")
                 if knowledge_point_id is not None:
                     reasons.append("知识点ID过滤匹配")
-                out_items.append(
-                    {
-                        "resource": _resource_dto(r),
-                        "reasons": reasons,
-                        "paths": paths_by_id.get(r.id, []),
-                    }
-                )
+                out_items.append({
+                    "resource": _resource_dto(r),
+                    "reasons": reasons,
+                    "paths": paths_by_id.get(r.id, []),
+                })
 
-            return jsonify({"items": out_items})
+            return jsonify({"items": out_items, "total": total, "page": page, "page_size": page_size})
+
+    @app.get("/api/resources/search_semantic")
+    def search_semantic_alias():
+        return semantic_search()
 
     def _recommend_response(db: Session, user_id: int, limit: int = 10, debug: bool = False):
         items = _recommend(db, user_id=user_id, neo4j_driver=neo4j_driver, top_n=limit, debug=debug)
@@ -5983,11 +6146,22 @@ def _user_dto(u: User) -> Dict[str, Any]:
     return data
 
 
+def _resource_file_hash(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as fp:
+        for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def _resource_dto(r: Resource, db: Optional[Session] = None) -> Dict[str, Any]:
     course_label = r.course.name if r.course else r.course_name
     chapter_label = r.chapter.name if r.chapter else r.chapter_name
     section_label = r.section.name if r.section else r.section_name
-    kp_label = r.knowledge_point.name if r.knowledge_point else r.knowledge_point_name
+    
+    # 优先使用 knowledge_point_name (可能包含多个知识点)，若为空则回退到关联的单一知识点名称
+    kp_label = r.knowledge_point_name if r.knowledge_point_name else (r.knowledge_point.name if r.knowledge_point else None)
+    
     kps = []
     if r.resource_knowledge_points:
         for rkp in r.resource_knowledge_points:
@@ -5995,7 +6169,8 @@ def _resource_dto(r: Resource, db: Optional[Session] = None) -> Dict[str, Any]:
                 kps.append({"id": rkp.knowledge_point.id, "name": rkp.knowledge_point.name})
     if not kps and kp_label:
         # 兼容旧逻辑或冗余字段
-        for name in [n.strip() for n in kp_label.split(",") if n.strip()]:
+        # 支持多种分隔符：英文逗号、中文逗号、顿号
+        for name in [n.strip() for n in re.split(r"[,，、]", kp_label) if n.strip()]:
             kps.append({"id": r.knowledge_point_id, "name": name})
 
     teachers = []

@@ -12,9 +12,6 @@ import {
   Memo,
   Files,
   DocumentAdd,
-  CircleCheck,
-  CircleClose,
-  Warning,
   Folder,
   FolderOpened,
   Document,
@@ -79,8 +76,22 @@ const uploadForm = ref({ title: '', description: '', chapter_id: null, section_i
 const batchFiles = ref([])
 const batchSubmitting = ref(false)
 const batchResults = ref([])
+const kpDrafts = ref({})
+const kpDraftInputs = ref({})
+const normalizedBatchResults = computed(() => batchResults.value.map((row, index) => ({
+  ...row,
+  rowKey: getBatchRowKey(row, index),
+})))
+const batchUploadSubmitting = ref(false)
+const batchRemoveConfirmVisible = ref(false)
+const batchRemoveTarget = ref(null)
+const batchRemoveTargetIndex = ref(-1)
 const batchChapterId = ref(null)
 const batchSectionId = ref(null)
+const batchDraftKey = computed(() => {
+  const cid = isNumberValue(courseId.value) ? courseId.value : 'none'
+  return `teacher-batch-draft:${cid}`
+})
 const batchResultsMaxHeight = computed(() => {
   const rows = Math.max(batchResults.value.length, 1)
   return Math.min(64 + rows * 48, 360)
@@ -155,16 +166,24 @@ const uploadKpOptions = computed(() => {
 
 const displayKnowledgePoints = computed(() => {
   if (!isNumberValue(courseId.value)) return []
-  
+
+  let filtered = []
   if (isNumberValue(sectionId.value)) {
-    return knowledgePoints.value.filter(k => k.section_id === sectionId.value)
+    filtered = knowledgePoints.value.filter(k => Number(k.section_id) === Number(sectionId.value))
+  } else if (isNumberValue(chapterId.value)) {
+    filtered = knowledgePoints.value.filter(k => Number(k.chapter_id) === Number(chapterId.value) && !k.section_id)
+  } else {
+    filtered = knowledgePoints.value.filter(k => !k.chapter_id && !k.section_id)
   }
-  
-  if (isNumberValue(chapterId.value)) {
-    return knowledgePoints.value.filter(k => k.chapter_id === chapterId.value && !k.section_id)
-  }
-  
-  return knowledgePoints.value.filter(k => !k.chapter_id && !k.section_id)
+
+  const seen = new Set()
+  return filtered.filter((kp) => {
+    const key = String(kp?.name || '').trim().toLowerCase()
+    if (!key) return false
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 })
 
 function onBatchFileChange(ev) {
@@ -174,12 +193,137 @@ function onBatchFileChange(ev) {
   }
 }
 
+function getBatchRowKey(row, index) {
+  const name = String(row?.filename || row?.file_name || row?.title || '').trim()
+  if (name) return name
+  return `row-${index}`
+}
+
+function normalizeKpDrafts(results = [], previousDrafts = {}) {
+  const next = {}
+  results.forEach((row, idx) => {
+    const key = getBatchRowKey(row, idx)
+    const raw = Array.isArray(row.kp_items)
+      ? row.kp_items
+      : typeof row.kp === 'string'
+        ? row.kp.split(',').map(s => s.trim()).filter(Boolean)
+        : []
+    const existing = Array.isArray(previousDrafts[key]) ? previousDrafts[key] : []
+    next[key] = Array.from(new Set([...existing, ...raw]))
+  })
+  kpDrafts.value = next
+}
+
+function persistBatchDraft() {
+  try {
+    const payload = {
+      courseId: courseId.value,
+      batchChapterId: batchChapterId.value,
+      batchSectionId: batchSectionId.value,
+      batchResults: batchResults.value,
+      kpDrafts: kpDrafts.value,
+      kpDraftInputs: kpDraftInputs.value,
+      savedAt: new Date().toISOString(),
+    }
+    localStorage.setItem(batchDraftKey.value, JSON.stringify(payload))
+  } catch {
+    // ignore storage failure
+  }
+}
+
+function restoreBatchDraft() {
+  try {
+    const raw = localStorage.getItem(batchDraftKey.value)
+    if (!raw) return false
+    const parsed = JSON.parse(raw)
+    batchResults.value = Array.isArray(parsed.batchResults) ? parsed.batchResults : []
+    kpDrafts.value = parsed.kpDrafts && typeof parsed.kpDrafts === 'object' ? parsed.kpDrafts : {}
+    kpDraftInputs.value = parsed.kpDraftInputs && typeof parsed.kpDraftInputs === 'object' ? parsed.kpDraftInputs : {}
+    batchChapterId.value = parsed.batchChapterId ?? batchChapterId.value
+    batchSectionId.value = parsed.batchSectionId ?? batchSectionId.value
+    if (isNumberValue(parsed.courseId)) courseId.value = parsed.courseId
+    else if (!isNumberValue(courseId.value)) courseId.value = parsed.courseId ?? courseId.value
+    return true
+  } catch {
+    return false
+  }
+}
+
+function clearBatchDraft() {
+  try {
+    localStorage.removeItem(batchDraftKey.value)
+  } catch {
+    // ignore storage failure
+  }
+}
+
+function addKpDraft(rowKey) {
+  const input = (kpDraftInputs.value[rowKey] || '').trim()
+  if (!input) return
+  const current = [...(kpDrafts.value[rowKey] || [])]
+  current.push(input)
+  kpDrafts.value = { ...kpDrafts.value, [rowKey]: current }
+  kpDraftInputs.value = { ...kpDraftInputs.value, [rowKey]: '' }
+  syncBatchResultKpText(rowKey)
+}
+
+function removeKpDraft(rowKey, kpIndex) {
+  const current = [...(kpDrafts.value[rowKey] || [])]
+  current.splice(kpIndex, 1)
+  kpDrafts.value = { ...kpDrafts.value, [rowKey]: current }
+  syncBatchResultKpText(rowKey)
+}
+
+function openRemoveBatchResultConfirm(row, index) {
+  batchRemoveTarget.value = row
+  batchRemoveTargetIndex.value = index
+  batchRemoveConfirmVisible.value = true
+}
+
+function removeBatchResult(row, index) {
+  const rowKey = getBatchRowKey(row, index)
+  batchResults.value = batchResults.value.filter((item, i) => getBatchRowKey(item, i) !== rowKey)
+  const nextDrafts = { ...kpDrafts.value }
+  const nextInputs = { ...kpDraftInputs.value }
+  delete nextDrafts[rowKey]
+  delete nextInputs[rowKey]
+  kpDrafts.value = nextDrafts
+  kpDraftInputs.value = nextInputs
+  persistBatchDraft()
+}
+
+function confirmRemoveBatchResult() {
+  if (!batchRemoveTarget.value || batchRemoveTargetIndex.value < 0) return
+  removeBatchResult(batchRemoveTarget.value, batchRemoveTargetIndex.value)
+  batchRemoveTarget.value = null
+  batchRemoveTargetIndex.value = -1
+  batchRemoveConfirmVisible.value = false
+}
+
+function cancelRemoveBatchResult() {
+  batchRemoveTarget.value = null
+  batchRemoveTargetIndex.value = -1
+  batchRemoveConfirmVisible.value = false
+}
+
+function syncBatchResultKpText(rowKey) {
+  const current = kpDrafts.value[rowKey] || []
+  const row = batchResults.value.find((item, index) => getBatchRowKey(item, index) === rowKey)
+  if (!row) return
+  row.kp = current.filter(Boolean).join(', ')
+  persistBatchDraft()
+}
+
 function onCatalogFileChange(ev) {
   const f = ev?.target?.files?.[0]
   catalogFile.value = f || null
 }
 
-async function submitBatchUpload() {
+function syncDraftState() {
+  persistBatchDraft()
+}
+
+async function processBatchFiles() {
   if (!isTeacher.value) {
     ElMessage.error('当前角色无上传权限')
     return
@@ -212,16 +356,57 @@ async function submitBatchUpload() {
     const resp = await api.post('/api/resources/batch-upload', fd, {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
-    batchResults.value = resp.data.results || []
+    const nextResults = Array.isArray(resp.data.results) ? resp.data.results : []
+    batchResults.value = batchResults.value.concat(nextResults)
+    normalizeKpDrafts(batchResults.value, kpDrafts.value)
+    persistBatchDraft()
     ElMessage.success(`批量处理完成：成功 ${batchResults.value.filter(r => r.status === 'success').length} 份`)
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '批量处理失败')
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+async function uploadProcessedBatch() {
+  if (!batchResults.value.length) {
+    ElMessage.warning('请先完成一键处理')
+    return
+  }
+  if (!batchResults.value.some(r => r.status === 'success')) {
+    ElMessage.warning('没有可上传的处理结果')
+    return
+  }
+
+  batchUploadSubmitting.value = true
+  try {
+    const payload = normalizedBatchResults.value
+      .filter(r => r.status === 'success')
+      .map((row) => ({
+        ...row,
+        kp: (kpDrafts.value[row.rowKey] || []).filter(Boolean).join(', '),
+      }))
+
+    await api.post('/api/resources/batch-upload/submit', {
+      course_id: courseId.value,
+      chapter_id: batchChapterId.value,
+      section_id: batchSectionId.value,
+      results: payload,
+    })
+
+    ElMessage.success('已提交全部处理结果到教务管理员审核')
+    batchResults.value = []
+    kpDrafts.value = {}
+    kpDraftInputs.value = {}
     batchFiles.value = []
+    clearBatchDraft()
     const fileInput = document.querySelector('.batch-hidden-input')
     if (fileInput) fileInput.value = ''
     await fetchMyResources()
   } catch (e) {
-    ElMessage.error(e?.response?.data?.error?.message || '批量上传失败')
+    ElMessage.error(e?.response?.data?.error?.message || '上传提交失败')
   } finally {
-    batchSubmitting.value = false
+    batchUploadSubmitting.value = false
   }
 }
 
@@ -676,7 +861,7 @@ async function submitUpload() {
     if (fileInput) fileInput.value = ''
     await fetchMyResources()
   } catch (e) {
-    ElMessage.error(e?.response?.data?.error?.message || '上传失败')
+    ElMessage.error(e?.response?.data?.error?.message || e?.response?.data?.message || '上传失败')
   } finally {
     uploadSubmitting.value = false
   }
@@ -739,56 +924,6 @@ async function download(item) {
   }
 }
 
-async function applySuggestion(row) {
-  try {
-    await ElMessageBox.confirm(
-      `确认将资源「${row.title}」移动到建议位置「${row.suggestion?.target_name}」吗？`,
-      '采纳建议',
-      { 
-        type: 'info',
-        confirmButtonText: '确定移动',
-        cancelButtonText: '取消'
-      }
-    )
-    const resp = await api.post(`/api/resources/${row.id}/apply-suggestion`)
-    ElMessage.success(resp.data.message || '操作成功')
-    await fetchMyResources()
-  } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error(e?.response?.data?.error?.message || '操作失败')
-    }
-  }
-}
-
-async function addToBlacklist(row) {
-  const word = row.suggestion?.identified_word
-  if (!word) {
-    ElMessage.warning('未能识别出对应的黑名单词汇')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      `以后将不再根据关键词「${word}」自动推荐关联位置。确认将其加入该课程的识别黑名单吗？`,
-      '忽略并加入黑名单',
-      { 
-        type: 'warning',
-        confirmButtonText: '加入黑名单',
-        cancelButtonText: '取消'
-      }
-    )
-    await api.post('/api/blacklist', {
-      word: word,
-      course_id: courseId.value,
-      reason: `教师在处理资源「${row.title}」时手动忽略`
-    })
-    ElMessage.success('已加入黑名单，下次上传将不再提示')
-    await fetchMyResources()
-  } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error(e?.response?.data?.error?.message || '操作失败')
-    }
-  }
-}
 
 function getStatusType(status) {
   switch (status) {
@@ -846,11 +981,24 @@ watch(batchChapterId, async () => {
   batchSectionId.value = null
 })
 
+watch(courseId, () => {
+  restoreBatchDraft()
+})
+
+watch([batchChapterId, batchSectionId], () => {
+  persistBatchDraft()
+})
+
+watch([batchResults, kpDrafts, kpDraftInputs], () => {
+  persistBatchDraft()
+}, { deep: true })
+
 watch(resourceStatus, fetchMyResources)
 
 onMounted(async () => {
   await fetchCourses()
   await Promise.all([fetchChapters(), fetchSectionsForKp(), fetchKnowledgePoints(), fetchMyResources(), fetchManagedResources()])
+  restoreBatchDraft()
 })
 </script>
 
@@ -1127,72 +1275,57 @@ onMounted(async () => {
                     </el-row>
                   </el-form>
 
-                  <div class="upload-footer" style="margin-top: 20px">
+                  <div class="upload-footer batch-upload-footer" style="margin-top: 20px">
                     <div class="file-input-wrapper">
                       <el-button type="primary" plain :icon="Upload">多选文件</el-button>
                       <input type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xlsx,.txt" :disabled="batchSubmitting" @change="onBatchFileChange" class="hidden-input batch-hidden-input" />
                       <span v-if="batchFiles.length > 0" class="file-name">已选择 {{ batchFiles.length }} 份文件</span>
                       <span v-else class="no-file">支持多选 PDF, Word, PPT/PPTX, Excel, TXT 文件</span>
                     </div>
-                    <el-button type="success" :loading="batchSubmitting" @click="submitBatchUpload" :disabled="batchFiles.length === 0">
-                      一键处理并上传
-                    </el-button>
+                    <div class="batch-upload-actions">
+                      <el-button type="warning" :loading="batchSubmitting" @click="processBatchFiles" :disabled="batchFiles.length === 0">
+                        一键处理
+                      </el-button>
+                      <el-button type="success" :loading="batchUploadSubmitting" @click="uploadProcessedBatch" :disabled="batchResults.length === 0">
+                        一键上传
+                      </el-button>
+                    </div>
                   </div>
 
                   <div v-if="batchResults.length > 0" class="batch-results" :style="{ maxHeight: `${batchResultsMaxHeight + 88}px` }">
                     <el-divider>处理结果</el-divider>
-                    <el-table :data="batchResults" size="small" border stripe :max-height="batchResultsMaxHeight">
-                      <el-table-column prop="filename" label="文件名" />
-                      <el-table-column prop="chapter" label="章节" />
-                      <el-table-column prop="section" label="小节" />
-                      <el-table-column prop="kp" label="识别到的知识点">
+                    <el-table :data="normalizedBatchResults" size="small" border stripe :max-height="batchResultsMaxHeight">
+                      <el-table-column prop="filename" label="文件名" width="400" />
+                      <el-table-column prop="chapter" label="章节" width="200" />
+                      <el-table-column prop="section" label="小节" width="200" />
+                      <el-table-column prop="kp" label="识别到的知识点" min-width="280">
                         <template #default="{ row }">
-                          <div class="kp-tags">
-                            <el-tag 
-                              v-for="kp in (row.kp || '').split(', ')" 
-                              :key="kp"
-                              size="small" 
-                              type="success"
-                              class="kp-tag"
-                            >{{ kp || '-' }}</el-tag>
+                          <div class="kp-edit-panel">
+                            <div class="kp-tags">
+                              <el-tag 
+                                v-for="(kp, kpIndex) in (kpDrafts[row.rowKey] || [])" 
+                                :key="`${row.rowKey}-${kpIndex}-${kp}`"
+                                size="small" 
+                                type="success"
+                                class="kp-tag"
+                                closable
+                                @close="removeKpDraft(row.rowKey, kpIndex)"
+                              >{{ kp || '未命名' }}</el-tag>
+                            </div>
+                            <div class="kp-edit-actions">
+                              <el-input
+                                v-model="kpDraftInputs[row.rowKey]"
+                                size="small"
+                                placeholder="输入知识点后点击添加"
+                                class="kp-input"
+                                @keyup.enter="addKpDraft(row.rowKey)"
+                              />
+                              <el-button size="small" type="success" @click="addKpDraft(row.rowKey)">添加</el-button>
+                            </div>
                           </div>
                         </template>
                       </el-table-column>
-                      <el-table-column label="智能建议" width="160">
-                        <template #default="{ row }">
-                          <div v-if="row.suggestion" class="suggestion-box">
-                            <el-tooltip :content="row.suggestion.reason" placement="top">
-                              <el-tag type="warning" size="small" class="suggestion-tag">
-                                <el-icon><Warning /></el-icon>
-                                建议移动到: {{ row.suggestion.target_name }}
-                              </el-tag>
-                            </el-tooltip>
-                          </div>
-                          <span v-else>-</span>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="操作" width="120" align="center">
-                        <template #default="{ row }">
-                          <el-button-group v-if="row.suggestion">
-                            <el-button 
-                              size="small" 
-                              type="primary" 
-                              :icon="CircleCheck" 
-                              @click="applySuggestion(row)"
-                              title="采纳建议"
-                            ></el-button>
-                            <el-button 
-                              v-if="row.suggestion.identified_word" 
-                              size="small" 
-                              type="warning" 
-                              :icon="CircleClose" 
-                              @click="addToBlacklist(row)"
-                              title="忽略并加入黑名单"
-                            ></el-button>
-                          </el-button-group>
-                          <span v-else>-</span>
-                        </template>
-                      </el-table-column>
+                      
                       <el-table-column prop="status" label="状态" width="100">
                         <template #default="{ row }">
                           <div style="display: flex; align-items: center; gap: 4px;">
@@ -1205,6 +1338,11 @@ onMounted(async () => {
                             </template>
                             <span>{{ row.status === 'success' ? '成功' : '失败' }}</span>
                           </div>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="操作" width="110" fixed="right" align="center">
+                        <template #default="{ row, $index }">
+                          <el-button size="small" type="danger" plain :icon="Delete" @click="openRemoveBatchResultConfirm(row, $index)">删除</el-button>
                         </template>
                       </el-table-column>
                     </el-table>
@@ -1293,22 +1431,6 @@ onMounted(async () => {
                 <template #default="{ row }">
                   <el-button-group>
                     <el-button size="small" :icon="Download" @click="download(row)" title="下载"></el-button>
-                    <el-button 
-                      v-if="row.suggestion" 
-                      size="small" 
-                      type="primary" 
-                      :icon="CircleCheck" 
-                      @click="applySuggestion(row)"
-                      title="采纳建议"
-                    ></el-button>
-                    <el-button 
-                      v-if="row.suggestion && row.suggestion.identified_word" 
-                      size="small" 
-                      type="warning" 
-                      :icon="CircleClose" 
-                      @click="addToBlacklist(row)"
-                      title="忽略并加入黑名单"
-                    ></el-button>
                     <el-button size="small" type="danger" :icon="Delete" @click="removeResource(row)" title="删除"></el-button>
                   </el-button-group>
                 </template>
@@ -1342,6 +1464,18 @@ onMounted(async () => {
       <template #footer>
         <el-button @click="chapterOpen = false">取消</el-button>
         <el-button type="primary" :loading="chapterSubmitting" @click="submitChapter">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="batchRemoveConfirmVisible" title="确认删除处理结果" width="420px">
+      <div style="line-height: 1.8; color: #606266;">
+        <p>确定要删除这条处理结果吗？</p>
+        <p v-if="batchRemoveTarget?.filename"><strong>文件：</strong>{{ batchRemoveTarget.filename }}</p>
+        <p>删除后，该文件将从当前批量处理列表中移除。</p>
+      </div>
+      <template #footer>
+        <el-button @click="cancelRemoveBatchResult">取消</el-button>
+        <el-button type="danger" @click="confirmRemoveBatchResult">确认删除</el-button>
       </template>
     </el-dialog>
 
@@ -1787,6 +1921,18 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: center;
   margin-top: 10px;
+  gap: 12px;
+}
+
+.batch-upload-footer {
+  justify-content: flex-start;
+}
+
+.batch-upload-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .file-input-wrapper {
@@ -1863,25 +2009,23 @@ onMounted(async () => {
   font-weight: 500;
 }
 
-.suggestion-box {
+.kp-edit-panel {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.suggestion-tag {
-  cursor: help;
+.kp-edit-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  gap: 8px;
 }
 
-.suggestion-tag :deep(.el-icon) {
-  margin-right: 2px;
+.kp-input {
+  width: 180px;
+  flex: 0 0 180px;
 }
+
 .kp-tags {
   display: flex;
   flex-wrap: wrap;

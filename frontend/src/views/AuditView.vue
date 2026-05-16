@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Stamp, FolderOpened, Delete } from '@element-plus/icons-vue'
 import api from '../api/client'
 
 const loading = ref(false)
@@ -296,7 +297,7 @@ onMounted(() => {
       <template #header>
         <div class="page-toolbar audit-toolbar audit-tabs-header">
           <div class="page-toolbar__title title-section audit-title-block">
-            <el-icon :size="22" class="title-icon"><Warning /></el-icon>
+            <el-icon :size="22" class="title-icon"><Stamp /></el-icon>
             <div class="title-block">
               <span class="title">资源审核</span>
               <span class="title-hint">支持资源审核与删除申请审核，删除申请只在删除申请页显示</span>
@@ -329,14 +330,16 @@ onMounted(() => {
           </div>
         </div>
         <div class="audit-tabs-nav-wrap">
-          <div class="audit-tabs-nav">
-            <div class="audit-view-tab" :class="{ active: state.mode === 'resource' }" @click="switchMode('resource')">
+          <div class="audit-mode-selector">
+            <div class="mode-item" :class="{ active: state.mode === 'resource' }" @click="switchMode('resource')">
               <el-icon><FolderOpened /></el-icon>
-              <span>资源审核（{{ resourceTabCount }}）</span>
+              <span>资源审核</span>
+              <span class="count-badge" :class="{ 'count-badge--zero': resourceTabCount === 0 }">{{ resourceTabCount }}</span>
             </div>
-            <div class="audit-view-tab" :class="{ active: state.mode === 'delete_request' }" @click="switchMode('delete_request')">
+            <div class="mode-item" :class="{ active: state.mode === 'delete_request' }" @click="switchMode('delete_request')">
               <el-icon><Delete /></el-icon>
-              <span>删除申请（{{ deleteRequestCount }}）</span>
+              <span>删除申请</span>
+              <span class="count-badge" :class="{ 'count-badge--zero': deleteRequestCount === 0 }">{{ deleteRequestCount }}</span>
             </div>
           </div>
         </div>
@@ -500,48 +503,66 @@ onMounted(() => {
 
 .audit-tabs-nav-wrap {
   width: auto;
+  margin-bottom: -1px;
 }
 
-.audit-tabs-nav {
-  display: flex;
-  align-items: stretch;
-  min-width: max-content;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px 8px 0 0;
-  overflow: hidden;
-  background: #f5f7fa;
-}
-
-.audit-view-tab {
-  min-width: 118px;
-  padding: 8px 14px;
+.audit-mode-selector {
   display: inline-flex;
+  background: #f0f2f5;
+  padding: 4px;
+  border-radius: 12px;
+  gap: 4px;
+  border: 1px solid #e4e7ed;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.mode-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  color: #606266;
+  font-weight: 500;
+  user-select: none;
+  font-size: 14px;
+}
+
+.mode-item.active {
+  background: #fff;
+  color: #409eff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.mode-item:hover:not(.active) {
+  color: #409eff;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.count-badge {
+  background: #f56c6c;
+  color: #fff;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 10px;
+  height: 18px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  cursor: pointer;
-  font-weight: 600;
-  color: #909399;
-  border-right: 1px solid #dcdfe6;
-  transition: all 0.2s ease;
-  background: #f5f7fa;
+  min-width: 18px;
+  font-weight: bold;
+  transition: all 0.3s ease;
 }
 
-.audit-view-tab:last-child {
-  border-right: none;
+.count-badge--zero {
+  background: #c0c4cc !important;
+  opacity: 0.7;
 }
 
-.audit-view-tab.active {
-  color: #409eff;
-  background: #fff;
-}
-
-.audit-view-tab:hover {
-  color: #409eff;
-}
-
-.audit-view-tab :deep(.el-icon) {
-  font-size: 16px;
+.mode-item.active .count-badge:not(.count-badge--zero) {
+  background: #409eff;
 }
 
 .audit-actions__fixed {

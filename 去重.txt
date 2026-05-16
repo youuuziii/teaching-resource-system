@@ -1,0 +1,19 @@
+任务目标：利用 resources 表中的 file_hash 字段，实现教师上传资源去重功能
+
+目前 resources 表中存在 file_hash 字段但均为空值。请按照以下步骤完善后端上传逻辑，启用去重拦截：
+
+1. 【计算文件 Hash】：
+   - 修改后端处理文件上传的接口（如存储文件流的路由）。
+   - 在接收到前端上传的文件流后、保存到本地或云存储之前，在服务器端使用 Python 内置的 `hashlib` 库，计算该文件的 MD5 或 SHA-256 值（例如：hashlib.md5(file_bytes).hexdigest()）。
+   - 将计算出的哈希字符串赋值给新资源对象的 `file_hash` 属性。
+
+2. 【碰撞检测与拦截】：
+   - 在执行数据库 `db.session.add()` 之前，先拿着计算好的 `file_hash` 去 `resources` 表中进行查询：
+     `existing_resource = Resource.query.filter_by(file_hash=current_hash).first()`
+   - 如果查询到了记录，说明该资源在系统内已存在。立即中断保存流程，并向前端返回错误响应，例如状态码 400：
+     {"ok": False, "message": "系统检测到该教学资源已被上传过，请勿重复上传！"}
+
+3. 【正常写入】：
+   - 如果不存在重复的 `file_hash`，则允许继续保存文件，并将文件信息（包含计算好的 `file_hash`）正常 Insert 进数据库，确保以后上传时能够被拦截。
+
+请理解上述闭环逻辑后，对后端的上传接口代码进行重构。
