@@ -40,6 +40,8 @@ const NAV_ITEMS = [
   { path: '/audit', label: '资源审核', icon: Checked },
   { path: '/courses', label: '课程分配', icon: Management },
   { path: '/admin/logs', label: '系统日志', icon: Setting },
+  { path: '/admin/config', label: '系统配置', icon: Setting },
+  { path: '/admin/backup', label: '数据备份', icon: Management },
   { path: '/admin/users', label: '账号权限', icon: User },
 ]
 

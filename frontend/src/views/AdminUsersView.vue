@@ -53,7 +53,7 @@ const pageOptions = ref([])
 const PAGE_GROUPS = [
   { title: '基础页面', paths: ['/', '/graph', '/profile'] },
   { title: '学习与教学', paths: ['/learning', '/teacher/courses'] },
-  { title: '管理后台', paths: ['/admin/audit', '/admin/courses', '/admin/logs', '/admin/users'] },
+  { title: '管理后台', paths: ['/audit', '/courses', '/admin/logs', '/admin/users', '/admin/config', '/admin/backup'] },
 ]
 
 const pageLabels = computed(() => new Map((pageOptions.value || []).map((p) => [p.value || p.path, p.label || p.name || p.path])))

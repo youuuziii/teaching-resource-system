@@ -9,6 +9,9 @@ import requests
 import jieba
 import jieba.analyse
 import jieba.posseg as pseg
+import tempfile
+import zipfile
+import subprocess
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import jwt
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
 from neo4j import GraphDatabase
 
@@ -445,6 +448,15 @@ class SystemLog(Base):
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
     meta: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+class SystemConfig(Base):
+    __tablename__ = "system_configs"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
 class Notification(Base):
@@ -933,7 +945,13 @@ def _create_app() -> Flask:
         3. 领域相关度
         """
         default_res = {"is_knowledge_point": False, "full_name": "", "domain_relevance": 0.0}
-        if not settings.llm_api_key or not word or len(word) < 2:
+        
+        with SessionLocal() as db:
+            api_key = _get_config(db, "LLM_API_KEY", settings.llm_api_key)
+            base_url = _get_config(db, "LLM_BASE_URL", settings.llm_base_url)
+            model = _get_config(db, "LLM_MODEL", settings.llm_model)
+
+        if not api_key or not word or len(word) < 2:
             return default_res
 
         try:
@@ -952,11 +970,11 @@ def _create_app() -> Flask:
 }}
 """
             headers = {
-                "Authorization": f"Bearer {settings.llm_api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "model": settings.llm_model,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": "你是一个专业的教育领域专家，擅长识别学科知识点并进行实体归一化。"},
                     {"role": "user", "content": prompt}
@@ -965,7 +983,7 @@ def _create_app() -> Flask:
                 "response_format": {"type": "json_object"}
             }
 
-            resp = requests.post(settings.llm_base_url + "/chat/completions", json=payload, headers=headers, timeout=5)
+            resp = requests.post(base_url + "/chat/completions", json=payload, headers=headers, timeout=5)
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"].strip()
                 # 处理可能的 markdown 格式
@@ -990,7 +1008,12 @@ def _create_app() -> Flask:
 
         raw_text = "".join(raw_candidates[:10])
 
-        if not settings.llm_api_key:
+        with SessionLocal() as db:
+            api_key = _get_config(db, "LLM_API_KEY", settings.llm_api_key)
+            base_url = _get_config(db, "LLM_BASE_URL", settings.llm_base_url)
+            model = _get_config(db, "LLM_MODEL", settings.llm_model)
+
+        if not api_key:
             return raw_candidates
 
         try:
@@ -1010,20 +1033,20 @@ def _create_app() -> Flask:
 {{"entities": ["实体1", "实体2"]}}
 """
             headers = {
-                "Authorization": f"Bearer {settings.llm_api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "model": settings.llm_model,
+                "model": model,
                 "messages": [
-                    {"role": "system", "content": "你是一个专业的教育领域专家，擅长识别学科知识点并进行实体归一化。"},
+                    {"role": "system", "content": "你是一个专业的教育领域专家，擅长从文件名中提取学科知识点实体。"},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.1,
                 "response_format": {"type": "json_object"}
             }
 
-            resp = requests.post(settings.llm_base_url + "/chat/completions", json=payload, headers=headers, timeout=15)
+            resp = requests.post(base_url + "/chat/completions", json=payload, headers=headers, timeout=15)
 
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -1538,11 +1561,38 @@ def _create_app() -> Flask:
         with SessionLocal() as db:
             _seed_rbac(db)
             _seed_majors(db)
+            _seed_configs(db)
             _backfill_resource_refs(db)
             users = db.execute(select(User)).scalars().all()
             for u in users:
                 _ensure_user_profiles(db, u, [r.name for r in (u.roles or [])])
             db.commit()
+
+    def _seed_configs(db: Session) -> None:
+        default_configs = [
+            ("LLM_API_KEY", settings.llm_api_key or "", "大模型 API 密钥"),
+            ("LLM_BASE_URL", settings.llm_base_url, "大模型 API 基础地址"),
+            ("LLM_MODEL", settings.llm_model, "使用的模型名称"),
+            ("SYSTEM_LOG_RETENTION_DAYS", str(settings.system_log_retention_days), "系统日志保留天数"),
+            ("FILE_CLEANUP_ENABLED", "true", "是否启用文件自动清理 (true/false)"),
+            ("AUDIT_AUTO_APPROVE", "false", "是否开启自动审核通过 (true/false)"),
+        ]
+        for key, value, desc in default_configs:
+            existing = db.get(SystemConfig, key)
+            if not existing:
+                db.add(SystemConfig(key=key, value=value, description=desc))
+        db.commit()
+
+    def _get_config(db: Session, key: str, default: Any) -> Any:
+        c = db.get(SystemConfig, key)
+        if c is None:
+            return default
+        if isinstance(default, int):
+            try: return int(c.value)
+            except: return default
+        if isinstance(default, bool):
+            return c.value.lower() in ("true", "1", "yes", "on")
+        return c.value
 
     def _seed_majors(db: Session) -> None:
         # Seed Departments
@@ -5979,28 +6029,54 @@ def _create_app() -> Flask:
     def get_logs():
         page = max(1, _parse_int(request.args.get("page")) or 1)
         page_size = min(100, max(1, _parse_int(request.args.get("page_size")) or 20))
-        retention_days = max(1, _parse_int(request.args.get("retention_days")) or settings.system_log_retention_days)
+        
+        # 增加过滤参数
+        method = request.args.get("method")
+        path_keyword = request.args.get("path")
+        status_code = _parse_int(request.args.get("status_code"))
+        username_keyword = request.args.get("username")
+
         offset = (page - 1) * page_size
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"admin"})
+
+            if request.args.get("retention_days") is None:
+                retention_days = _get_config(db, "SYSTEM_LOG_RETENTION_DAYS", settings.system_log_retention_days)
+            else:
+                retention_days = max(1, _parse_int(request.args.get("retention_days")) or settings.system_log_retention_days)
+
             _purge_old_system_logs(db, days=retention_days)
+            
             cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=retention_days)
-            stmt = select(SystemLog).where(SystemLog.created_at >= cutoff)
+            
+            # 联表查询 User 以获取用户名
+            stmt = select(SystemLog, User.username).outerjoin(User, SystemLog.user_id == User.id).where(SystemLog.created_at >= cutoff)
+            
+            if method:
+                stmt = stmt.where(SystemLog.method == method.upper())
+            if path_keyword:
+                stmt = stmt.where(SystemLog.path.contains(path_keyword))
+            if status_code:
+                stmt = stmt.where(SystemLog.status_code == status_code)
+            if username_keyword:
+                stmt = stmt.where(User.username.contains(username_keyword))
+
             total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0
-            logs = db.execute(stmt.order_by(SystemLog.created_at.desc()).offset(offset).limit(page_size)).scalars().all()
-            items = [
-                {
+            results = db.execute(stmt.order_by(SystemLog.created_at.desc()).offset(offset).limit(page_size)).all()
+            
+            items = []
+            for l, username in results:
+                items.append({
                     "id": l.id,
                     "user_id": l.user_id,
+                    "username": username or "Unknown",
                     "method": l.method,
                     "path": l.path,
                     "status_code": l.status_code,
                     "meta": l.meta,
                     "created_at": l.created_at.isoformat(),
-                }
-                for l in logs
-            ]
+                })
             return jsonify({"items": items, "total": total, "page": page, "page_size": page_size, "retention_days": retention_days})
 
     @app.post("/api/admin/backup")
@@ -6008,7 +6084,88 @@ def _create_app() -> Flask:
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"admin"})
-        return jsonify({"ok": True, "message": "backup endpoint stub"})
+            
+            # 创建临时目录进行备份
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                backup_data = {}
+                
+                # 获取所有表名
+                inspector = inspect(engine)
+                table_names = inspector.get_table_names()
+                
+                for table_name in table_names:
+                    # 直接使用 SQL 导出
+                    from sqlalchemy import text
+                    rows = db.execute(text(f"SELECT * FROM {table_name}")).mappings().all()
+                    
+                    # 转换数据格式以便 JSON 序列化
+                    data = []
+                    for row in rows:
+                        item = {}
+                        for k, v in row.items():
+                            if isinstance(v, (dt.datetime, dt.date)):
+                                item[k] = v.isoformat()
+                            elif isinstance(v, bytes):
+                                item[k] = v.hex()
+                            else:
+                                item[k] = v
+                        data.append(item)
+                    
+                    # 写入 JSON 文件
+                    with (tmp_path / f"{table_name}.json").open("w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                
+                # 创建压缩包
+                timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                zip_filename = f"backup_{timestamp}.zip"
+                zip_path = Path(tempfile.gettempdir()) / zip_filename
+                
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                    for json_file in tmp_path.glob("*.json"):
+                        zipf.write(json_file, json_file.name)
+                
+                return send_file(
+                    zip_path,
+                    as_attachment=True,
+                    download_name=zip_filename,
+                    mimetype="application/zip"
+                )
+
+    @app.get("/api/admin/configs")
+    def get_configs():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"admin"})
+            configs = db.execute(select(SystemConfig).order_by(SystemConfig.key)).scalars().all()
+            return jsonify({
+                "items": [
+                    {
+                        "key": c.key,
+                        "value": c.value,
+                        "description": c.description,
+                        "updated_at": c.updated_at.isoformat()
+                    } for c in configs
+                ]
+            })
+
+    @app.post("/api/admin/configs")
+    def update_config():
+        data = _json()
+        key = data.get("key")
+        value = str(data.get("value", ""))
+        if not key:
+            raise ApiError("BAD_REQUEST", "key required", 400)
+        
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"admin"})
+            c = db.get(SystemConfig, key)
+            if not c:
+                raise ApiError("NOT_FOUND", "config not found", 404)
+            c.value = value
+            db.commit()
+            return jsonify({"ok": True})
 
     app.init_db = init_db  # type: ignore[attr-defined]
     app.settings = settings  # type: ignore[attr-defined]
@@ -6050,6 +6207,8 @@ def _seed_rbac(db: Session) -> None:
         {"name": "课程分配", "path": "/courses", "component": "CoursesView"},
         {"name": "系统日志", "path": "/admin/logs", "component": "AdminLogsView"},
         {"name": "账号管理", "path": "/admin/users", "component": "AdminUsersView"},
+        {"name": "系统配置", "path": "/admin/config", "component": "AdminConfigView"},
+        {"name": "数据备份", "path": "/admin/backup", "component": "AdminBackupView"},
     ]
     existing_pages = db.execute(select(Page)).scalars().all()
     page_by_path = {p.path: p for p in existing_pages}
@@ -6083,12 +6242,16 @@ def _seed_rbac(db: Session) -> None:
         "student": ["/", "/graph", "/profile", "/learning"],
         "teacher": ["/", "/graph", "/profile", "/teacher/courses"],
         "dean": ["/", "/graph", "/profile", "/audit", "/courses", "/admin/users"],
-        "admin": ["/", "/graph", "/profile", "/audit", "/courses", "/admin/logs", "/admin/users"],
+        "admin": ["/", "/graph", "/profile", "/audit", "/courses", "/admin/logs", "/admin/users", "/admin/config", "/admin/backup"],
     }
     for role_name, paths in default_role_pages.items():
         role = role_by_name.get(role_name)
-        if role and not role.pages:
-            role.pages = [page_by_path[p] for p in paths if p in page_by_path]
+        if role:
+            # 确保角色拥有预设的所有页面，而不仅仅是初始化时
+            existing_paths = {p.path for p in role.pages}
+            for p_path in paths:
+                if p_path in page_by_path and p_path not in existing_paths:
+                    role.pages.append(page_by_path[p_path])
     db.commit()
 
 
