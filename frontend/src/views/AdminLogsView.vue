@@ -6,7 +6,7 @@ import api from '../api/client'
 
 const loading = ref(false)
 const items = ref([])
-const retentionDays = ref(7)
+const retentionDays = ref(null) // 初始设为 null，由后端返回默认配置
 const pagination = ref({ page: 1, pageSize: 12, total: 0 })
 
 // 过滤条件
@@ -26,25 +26,42 @@ const isAdmin = computed(() => {
   }
 })
 
-const retentionLabel = computed(() => `${retentionDays.value}天`)
+const retentionLabel = computed(() => retentionDays.value ? `${retentionDays.value}天` : '加载中...')
 
-function handleRetentionChange(val) {
-  retentionDays.value = Number(val)
-  pagination.value.page = 1
-  fetchLogs()
+async function handleRetentionChange(val) {
+  const oldVal = retentionDays.value
+  const newVal = Number(val)
+  retentionDays.value = newVal
+  
+  try {
+    // 同步更新系统配置，实现持久化
+    await api.post('/api/admin/configs', {
+      key: 'SYSTEM_LOG_RETENTION_DAYS',
+      value: String(newVal)
+    })
+    pagination.value.page = 1
+    fetchLogs()
+  } catch (e) {
+    retentionDays.value = oldVal
+    ElMessage.error('持久化配置失败')
+  }
 }
 
 async function fetchLogs() {
   loading.value = true
   try {
-    const resp = await api.get('/api/admin/logs', {
-      params: {
-        page: pagination.value.page,
-        page_size: pagination.value.pageSize,
-        retention_days: retentionDays.value,
-        ...filters.value
-      },
-    })
+    const params = {
+      page: pagination.value.page,
+      page_size: pagination.value.pageSize,
+      ...filters.value
+    }
+    // 只有当用户主动在当前会话修改过，或者已经加载出初始值后，才发送该参数
+    // 第一次加载时传 null，后端会从数据库读取配置
+    if (retentionDays.value !== null) {
+      params.retention_days = retentionDays.value
+    }
+
+    const resp = await api.get('/api/admin/logs', { params })
     items.value = resp.data.items || []
     pagination.value.total = resp.data.total ?? resp.data.items?.length ?? 0
     retentionDays.value = resp.data.retention_days ?? retentionDays.value

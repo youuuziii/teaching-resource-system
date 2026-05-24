@@ -1060,6 +1060,94 @@ def _create_app() -> Flask:
 
         return raw_candidates
 
+    def _clean_standardize(text: str) -> str:
+        if not text: return ""
+        # 1. 清洗乱码：仅保留常见字符集（ASCII + CJK + 常见中文标点 + 全角符号）
+        text = re.sub(r"[^\x00-\x7f\u4e00-\u9fa5\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]", " ", text)
+        # 2. 清洗水印、页码等常见干扰文本
+        text = re.sub(r"第\s*\d+\s*页|Page\s*\d+|[^\x00-\x7f\u4e00-\u9fa5，。？！、；：“”‘’（）《》【】]", " ", text, flags=re.I)
+        # 3. 处理多行空格（空行）和行内重复空格
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        # 4. 彻底合并所有空白（遵循原有逻辑，确保知识点提取不受干扰）
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    def _do_clean_resource_file(res: Resource) -> None:
+        if not res or not res.file_path or not os.path.exists(res.file_path):
+            return
+        suffix = Path(res.file_name).suffix.lower()
+        try:
+            if suffix == ".txt":
+                content = ""
+                try:
+                    with open(res.file_path, "r", encoding="utf-8") as f: content = f.read()
+                except:
+                    with open(res.file_path, "r", encoding="gbk") as f: content = f.read()
+                
+                cleaned = _clean_standardize(content)
+                with open(res.file_path, "w", encoding="utf-8") as f:
+                    f.write(cleaned)
+                res.file_size = os.path.getsize(res.file_path)
+                res.file_hash = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+            
+            elif suffix == ".docx":
+                import zipfile
+                import xml.etree.ElementTree as ET
+                from io import BytesIO
+
+                with zipfile.ZipFile(res.file_path, 'r') as docx:
+                    xml_content = docx.read("word/document.xml")
+                
+                tree = ET.fromstring(xml_content)
+                namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+                for node in tree.findall(".//w:t", namespaces):
+                    if node.text:
+                        node.text = _clean_standardize(node.text)
+                
+                new_xml = ET.tostring(tree, encoding='utf-8')
+                buffer = BytesIO()
+                with zipfile.ZipFile(res.file_path, 'r') as old_docx:
+                    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as new_docx:
+                        for item in old_docx.infolist():
+                            if item.filename == "word/document.xml":
+                                new_docx.writestr(item, new_xml)
+                            else:
+                                new_docx.writestr(item, old_docx.read(item.filename))
+                
+                with open(res.file_path, "wb") as f:
+                    f.write(buffer.getvalue())
+                res.file_size = os.path.getsize(res.file_path)
+                res.file_hash = hashlib.sha256(buffer.getvalue()).hexdigest()
+
+            elif suffix == ".xlsx":
+                import pandas as pd
+                df = pd.read_excel(res.file_path)
+                for col in df.select_dtypes(include=['object']):
+                    df[col] = df[col].apply(lambda x: _clean_standardize(str(x)) if pd.notnull(x) else x)
+                df.to_excel(res.file_path, index=False)
+                res.file_size = os.path.getsize(res.file_path)
+                with open(res.file_path, "rb") as f:
+                    res.file_hash = hashlib.sha256(f.read()).hexdigest()
+        except Exception as e:
+            print(f"[!] File cleaning error for {res.file_name}: {e}")
+
+    def _clean_and_save_resource(res_id: int, db: Session) -> None:
+        """
+        核心清洗与存储逻辑：
+        1. 读取原始文件
+        2. 提取文本并执行 _clean_standardize
+        3. 如果是可编辑格式（TXT, DOCX, XLSX），写回清洗后的内容
+        4. 如果是不可编辑格式（PDF, PPTX），在数据库中标记已清洗
+        """
+        res = db.get(Resource, res_id)
+        if not res:
+            return
+        _do_clean_resource_file(res)
+        db.commit()
+        print(f"[*] File cleaned and overwritten: {res.file_name}")
+
     def _process_resource_pipeline(res: Resource, db: Session, dry_run: bool = False) -> None:
         """
         增强版自动化数据处理流程：
@@ -1132,16 +1220,7 @@ def _create_app() -> Flask:
             raw_text = f"提取内容失败: {str(e)}"
 
         # --- 步骤 2: 数据清洗与标准化 ---
-        def clean_standardize(text: str) -> str:
-            # 清洗空行、多余空格
-            text = re.sub(r"\n\s*\n", "\n", text)
-            # 清洗特殊符号、乱码、水印（模拟常见水印清洗）
-            text = re.sub(r"第\s*\d+\s*页|Page\s*\d+|[^\x00-\x7f\u4e00-\u9fa5，。？！、；：“”‘’（）《》]", " ", text, flags=re.I)
-            # 统一文本编码已经在读取时处理，最终统一清洗多余空格
-            text = re.sub(r"\s+", " ", text).strip()
-            return text
-        
-        cleaned_text = clean_standardize(raw_text)
+        cleaned_text = _clean_standardize(raw_text)
 
         # --- 步骤 3: 自动实体识别与知识图谱构建 (NER & RE) ---
         # 1. 优先处理教师手动填写/批量提交的知识点，再补充自动抽取结果
@@ -1166,9 +1245,14 @@ def _create_app() -> Flask:
         if not is_manual_mode:
             file_base = Path(res.file_name).stem
             print(f"[*] Identification mode: Identifying entity for: {file_base}")
+            
+            # --- 阶段0: 文件名清洗 (New: Apply cleaning to filename too) ---
+            clean_name = _clean_standardize(file_base)
+            print(f"[DEBUG-NER] Cleaned filename: {clean_name}")
+
             # --- 阶段1: 预处理 (Preprocessing) ---
             # 1.1 仅剔除日期、版本、括号内容，保留核心文本以维持分词上下文
-            clean_name = re.sub(r"\[.*?\]|（.*?）|\(.*?\)|《|》", "", file_base)
+            clean_name = re.sub(r"\[.*?\]|（.*?）|\(.*?\)|《|》", "", clean_name)
             clean_name = re.sub(r"\d{4}[-/_]\d{2}([-/_]\d{2})?", "", clean_name)
             clean_name = re.sub(r"v\d+\.\d+|最新版|修订版|最终版", "", clean_name, flags=re.I)
             clean_name = clean_name.strip("- _")
@@ -3868,7 +3952,11 @@ def _create_app() -> Flask:
             db.add(res)
             db.flush()
 
-            # 上传阶段仅进行干跑 (dry_run)，识别知识点但不创建数据库记录
+            # --- 新增：文件清洗逻辑 ---
+            # 对上传的文件先进行清洗， storage 目录下只存清洗后的版本
+            _clean_and_save_resource(res.id, db)
+
+            # 之后再进行 pipeline 处理（包括文件名实体抽取）
             _process_resource_pipeline(res, db, dry_run=True)
 
             tags = _split_tags(tags_raw)
@@ -4011,6 +4099,9 @@ def _create_app() -> Flask:
                             created_by=user.id,
                             status="pending",
                         )
+                        # 在预览阶段也进行清洗，确保提取出的内容和预览信息是准确的
+                        _do_clean_resource_file(dummy_res)
+                        
                         _process_resource_pipeline(dummy_res, db, dry_run=True)
 
                         results.append({
@@ -4110,6 +4201,10 @@ def _create_app() -> Flask:
                 )
                 db.add(res)
                 db.flush()
+
+                # --- 新增：文件清洗逻辑 ---
+                # 在批量提交时对文件进行清洗，确保存储的是清洗后的版本
+                _clean_and_save_resource(res.id, db)
 
                 kp_text = row.get("kp") or ""
                 # 支持多种分隔符：英文逗号、中文逗号、顿号
