@@ -2649,7 +2649,7 @@ def _create_app() -> Flask:
         description = (data.get("description") or "").strip() or None
         if not name:
             raise ApiError("BAD_REQUEST", "name required", 400)
-        
+
         with SessionLocal() as db:
             user = require_auth(db)
             require_roles(user, {"dean"})
@@ -2657,26 +2657,27 @@ def _create_app() -> Flask:
             if existing:
                 existing.code = code
                 existing.description = description
-                
+
                 # Update course_majors
                 existing.course_majors.clear()
+                db.flush()
+
                 for mid in major_ids:
                     existing.course_majors.append(CourseMajor(major_id=mid))
-                
+
                 db.commit()
                 _neo4j_upsert_course(existing)
                 return jsonify({"course": {"id": existing.id, "name": existing.name, "code": existing.code, "description": existing.description}})
-            
+
             c = Course(name=name, code=code, description=description)
             for mid in major_ids:
                 c.course_majors.append(CourseMajor(major_id=mid))
-            
+
             db.add(c)
             db.commit()
             db.refresh(c)
             _neo4j_upsert_course(c)
             return jsonify({"course": {"id": c.id, "name": c.name, "code": c.code, "description": c.description}})
-
     
     @app.delete("/api/courses/<int:course_id>")
     def delete_course(course_id: int):
