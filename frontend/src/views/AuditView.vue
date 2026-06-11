@@ -238,6 +238,10 @@ async function batchApproveSelected() {
 
 async function submitAudit() {
   if (!dialog.target) return
+  if (dialog.nextStatus === 'rejected' && !dialog.comment?.trim()) {
+    ElMessage.warning('拒绝审核时必须填写审核意见')
+    return
+  }
   dialog.submitting = true
   try {
     await api.patch(`/api/resources/${dialog.target.id}/audit`, {
@@ -272,12 +276,19 @@ async function approveDeleteRequest(row) {
 
 async function rejectDeleteRequest(row) {
   try {
-    await ElMessageBox.confirm(
-      `确认拒绝删除申请《${row.resource_title || row.title}》吗？`,
+    const { value: comment } = await ElMessageBox.prompt(
+      `请输入拒绝删除申请《${row.resource_title || row.title}》的原因`,
       '拒绝删除申请',
-      { type: 'warning', confirmButtonText: '确定拒绝', cancelButtonText: '取消' },
+      {
+        confirmButtonText: '确定拒绝',
+        cancelButtonText: '取消',
+        inputPlaceholder: '例如：申请理由不充分 / 资源仍需保留',
+        inputValidator: (v) => (!v?.trim() ? '必须填写拒绝原因' : true),
+      },
     )
-    await api.post(`/api/admin/delete-requests/${row.resource_id || row.id}/reject`)
+    await api.post(`/api/admin/delete-requests/${row.resource_id || row.id}/reject`, {
+      comment: comment.trim(),
+    })
     ElMessage.success('已拒绝删除申请')
     await fetchDeleteRequests()
   } catch (e) {
@@ -474,13 +485,25 @@ onMounted(() => {
           <el-tag v-if="dialog.nextStatus === 'approved'" type="success">通过</el-tag>
           <el-tag v-else type="danger">拒绝</el-tag>
         </el-form-item>
-        <el-form-item label="备注">
-          <el-input v-model="dialog.comment" type="textarea" :rows="4" placeholder="可选" />
+        <el-form-item :label="dialog.nextStatus === 'rejected' ? '拒绝原因' : '备注'" :required="dialog.nextStatus === 'rejected'">
+          <el-input 
+            v-model="dialog.comment" 
+            type="textarea" 
+            :rows="4" 
+            :placeholder="dialog.nextStatus === 'rejected' ? '必填' : '可选'" 
+          />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialog.open = false">取消</el-button>
-        <el-button type="primary" :loading="dialog.submitting" @click="submitAudit">提交</el-button>
+        <el-button 
+          type="primary" 
+          :loading="dialog.submitting" 
+          :disabled="dialog.nextStatus === 'rejected' && !dialog.comment?.trim()"
+          @click="submitAudit"
+        >
+          提交
+        </el-button>
       </template>
     </el-dialog>
   </div>

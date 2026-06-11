@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Collection, Share, User, UserFilled, Setting, Checked, Management, Memo, SwitchButton, Notebook } from '@element-plus/icons-vue'
 import logo from './assets/logo.png'
 import { useNotificationSummary } from './composables/useNotificationSummary'
+import api from './api/client'
 
 const route = useRoute()
 const router = useRouter()
@@ -31,6 +32,13 @@ const authIdentity = computed(() => user.value?.id || user.value?.username || to
 const elementLocale = zhCn
 const { notificationCount, hasPendingResourceReview, hasPendingDeleteRequest, resetNotificationState, stopNotificationPolling } =
   useNotificationSummary(authIdentity, isAuthed, roles)
+
+const avatarUrl = computed(() => {
+  if (!user.value?.avatar_url) return ''
+  const baseUrl = api.defaults.baseURL || ''
+  const path = user.value.avatar_url
+  return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) + path : baseUrl + path
+})
 
 const NAV_ITEMS = [
   { path: '/', label: '资源中心', icon: Collection },
@@ -118,7 +126,7 @@ onBeforeUnmount(() => {
           <template v-if="isAuthed">
             <div class="user-card" @click="go('/profile')">
               <el-badge :value="notificationCount" :hidden="notificationCount === 0" :max="99" class="avatar-badge">
-                <el-avatar :size="38" :icon="UserFilled" />
+                <el-avatar :size="38" :src="avatarUrl" :icon="UserFilled" />
               </el-badge>
               <div class="user-meta">
                 <div class="username">{{ user.username || '用户' }}</div>

@@ -94,7 +94,7 @@ const batchDraftKey = computed(() => {
 })
 const batchResultsMaxHeight = computed(() => {
   const rows = Math.max(batchResults.value.length, 1)
-  return Math.min(64 + rows * 48, 360)
+  return Math.min(64 + rows * 80, 1200)
 })
 
 function managedTableCellStyle({ column }) {
@@ -1236,7 +1236,7 @@ onMounted(async () => {
                     </el-row>
                     <div class="upload-footer">
                       <div class="file-input-wrapper">
-                        <el-button type="info" plain :icon="Upload">选择文件</el-button>
+                        <el-button type="primary" plain :icon="Upload">选择文件</el-button>
                         <input type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xlsx,.txt" :disabled="uploadSubmitting" @change="onFileChange" class="hidden-input" />
                         <span v-if="uploadForm.file" class="file-name">{{ uploadForm.file.name }}</span>
                         <span v-else class="no-file">未选择文件 (支持 PDF, Word, PPT/PPTX, Excel, TXT)</span>
@@ -1976,7 +1976,7 @@ onMounted(async () => {
 
 .batch-results :deep(.el-table__body-wrapper) {
   height: auto !important;
-  max-height: 320px;
+  max-height: 1100px;
 }
 
 .batch-results :deep(.el-table__empty-block) {

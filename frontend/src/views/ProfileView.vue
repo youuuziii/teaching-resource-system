@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
   User, 
   Phone, 
+  Message,
   Lock, 
   Bell, 
   Edit, 
@@ -24,7 +25,10 @@ const loading = ref(false)
 const user = ref(null)
 
 const editOpen = ref(false)
-const editForm = ref({ phone: '', password: '' })
+const editForm = ref({ name: '', phone: '', email: '' })
+
+const pwdOpen = ref(false)
+const pwdForm = ref({ password: '', confirmPassword: '' })
 
 const notifications = ref([])
 const loadingNotifications = ref(false)
@@ -104,7 +108,7 @@ function openEdit() {
   editForm.value = { 
     name: user.value?.name || user.value?.username || '',
     phone: user.value?.phone || '', 
-    password: '' 
+    email: user.value?.email || ''
   }
   editOpen.value = true
 }
@@ -115,8 +119,8 @@ async function submitEdit() {
   if (name) payload.name = name
   const phone = (editForm.value.phone || '').trim()
   if (phone) payload.phone = phone
-  const password = (editForm.value.password || '').trim()
-  if (password) payload.password = password
+  const email = (editForm.value.email || '').trim()
+  if (email) payload.email = email
 
   if (Object.keys(payload).length === 0) {
     editOpen.value = false
@@ -125,13 +129,40 @@ async function submitEdit() {
 
   try {
     const resp = await api.put('/api/me', payload)
-    ElMessage.success('保存成功')
+    ElMessage.success('个人资料更新成功')
     editOpen.value = false
     user.value = resp.data.user
     localStorage.setItem('user', JSON.stringify(user.value))
     window.dispatchEvent(new Event('user-updated'))
   } catch (e) {
     ElMessage.error(e?.response?.data?.error?.message || '保存失败')
+  }
+}
+
+function openPwdEdit() {
+  pwdForm.value = { password: '', confirmPassword: '' }
+  pwdOpen.value = true
+}
+
+async function submitPwdEdit() {
+  const password = (pwdForm.value.password || '').trim()
+  const confirm = (pwdForm.value.confirmPassword || '').trim()
+
+  if (!password) {
+    ElMessage.warning('请输入新密码')
+    return
+  }
+  if (password !== confirm) {
+    ElMessage.error('两次输入的密码不一致')
+    return
+  }
+
+  try {
+    await api.put('/api/me', { password })
+    ElMessage.success('密码修改成功')
+    pwdOpen.value = false
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.error?.message || '密码修改失败')
   }
 }
 
@@ -280,6 +311,11 @@ onMounted(async () => {
               <span class="value">{{ user?.phone || '未设置' }}</span>
             </div>
             <div class="info-item">
+              <el-icon><Message /></el-icon>
+              <span class="label">个人邮箱</span>
+              <span class="value">{{ user?.email || '未设置' }}</span>
+            </div>
+            <div class="info-item">
               <el-icon><Clock /></el-icon>
               <span class="label">注册时间</span>
               <span class="value">{{ user?.created_at ? new Date(user.created_at).toLocaleString() : '-' }}</span>
@@ -288,6 +324,9 @@ onMounted(async () => {
 
           <el-button class="edit-btn" :icon="Edit" @click="openEdit" block>
             编辑个人资料
+          </el-button>
+          <el-button class="pwd-btn" :icon="Lock" @click="openPwdEdit" block plain>
+            修改登录密码
           </el-button>
         </el-card>
       </el-col>
@@ -373,14 +412,32 @@ onMounted(async () => {
         <el-form-item label="手机号">
           <el-input v-model="editForm.phone" placeholder="请输入手机号" />
         </el-form-item>
-        <el-form-item label="新密码 (不修改请留空)">
-          <el-input v-model="editForm.password" type="password" placeholder="请输入新密码" show-password />
+        <el-form-item label="个人邮箱">
+          <el-input v-model="editForm.email" placeholder="请输入个人邮箱" />
         </el-form-item>
       </el-form>
       <template #footer>
         <div class="dialog-footer">
           <el-button @click="editOpen = false">取消</el-button>
           <el-button type="primary" @click="submitEdit">保存更改</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- Password Dialog -->
+    <el-dialog v-model="pwdOpen" title="修改登录密码" width="400px" border-radius="12px">
+      <el-form :model="pwdForm" label-position="top">
+        <el-form-item label="新密码">
+          <el-input v-model="pwdForm.password" type="password" placeholder="请输入新密码" show-password />
+        </el-form-item>
+        <el-form-item label="确认新密码">
+          <el-input v-model="pwdForm.confirmPassword" type="password" placeholder="请再次输入新密码" show-password />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="pwdOpen = false">取消</el-button>
+          <el-button type="primary" @click="submitPwdEdit">确认修改</el-button>
         </div>
       </template>
     </el-dialog>
@@ -493,8 +550,17 @@ onMounted(async () => {
 
 .edit-btn {
   width: calc(100% - 40px);
-  margin: 0 20px;
+  margin: 20px 20px 0;
   height: 40px;
+  font-weight: 600;
+  border-radius: 8px;
+}
+
+.pwd-btn {
+  width: calc(100% - 40px);
+  margin: 12px 20px 0 !important;
+  height: 40px;
+  font-weight: 600;
   border-radius: 8px;
 }
 

@@ -106,7 +106,7 @@ onBeforeUnmount(() => {
 
 async function submit() {
   if (!form.username || !form.password) {
-    ElMessage.warning('请输入用户名/学号/职工号和密码')
+    ElMessage.warning('请输入学号/职工号和密码')
     return
   }
   if (!form.role) {
@@ -174,7 +174,7 @@ async function submit() {
                 <el-input 
                   ref="usernameInputRef"
                   v-model="form.username" 
-                  placeholder="用户名 / 学号 / 职工号" 
+                  placeholder=" 学号 / 职工号" 
                   :prefix-icon="User"
                   autocomplete="username"
                   @focus="openSavedDropdown"

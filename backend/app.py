@@ -126,6 +126,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     phone: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    avatar_url: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
@@ -1752,6 +1753,8 @@ def _create_app() -> Flask:
             to_add: List[Tuple[str, str]] = []
             if "phone" not in cols:
                 to_add.append(("phone", "VARCHAR(32)"))
+            if "avatar_url" not in cols:
+                to_add.append(("avatar_url", "VARCHAR(256)"))
             if to_add:
                 with engine_.connect() as conn:
                     for name, sql_type in to_add:
@@ -3560,9 +3563,9 @@ def _create_app() -> Flask:
                     user = db.get(User, d_user_id)
 
             if not user or not _password_matches(user.password_hash, password):
-                raise ApiError("UNAUTHORIZED", "Invalid credentials", 401)
+                raise ApiError("UNAUTHORIZED", "用户名或密码错误", 401)
             if not user.is_active:
-                raise ApiError("FORBIDDEN", "User disabled", 403)
+                raise ApiError("FORBIDDEN", "该账户已被禁用，请联系管理员", 403)
             return jsonify({"token": make_token(user), "user": _user_dto_with_session(user, db)})
 
     @app.get("/api/me")
@@ -3637,10 +3640,13 @@ def _create_app() -> Flask:
     def update_me():
         data = _json()
         phone = data.get("phone")
+        email = data.get("email")
         password = data.get("password")
 
         if phone is not None and not isinstance(phone, str):
             raise ApiError("BAD_REQUEST", "phone must be string", 400)
+        if email is not None and not isinstance(email, str):
+            raise ApiError("BAD_REQUEST", "email must be string", 400)
         if password is not None and not isinstance(password, str):
             raise ApiError("BAD_REQUEST", "password must be string", 400)
 
@@ -3651,10 +3657,63 @@ def _create_app() -> Flask:
                 user.phone = phone
             if password is not None and password.strip():
                 user.password_hash = generate_password_hash(password.strip())
+            
+            # 更新关联表中的邮箱
+            if email is not None:
+                roles = {r.name for r in user.roles}
+                if "student" in roles:
+                    s = db.execute(select(Student).where(Student.user_id == user.id)).scalar_one_or_none()
+                    if s: s.email = email
+                if "teacher" in roles:
+                    t = db.execute(select(Teacher).where(Teacher.user_id == user.id)).scalar_one_or_none()
+                    if t: t.email = email
+                if "dean" in roles:
+                    d = db.execute(select(Dean).where(Dean.user_id == user.id)).scalar_one_or_none()
+                    if d: d.email = email
+                if "admin" in roles:
+                    a = db.execute(select(Admin).where(Admin.user_id == user.id)).scalar_one_or_none()
+                    if a: a.email = email
 
             db.commit()
             db.refresh(user)
-            return jsonify({"user": _user_dto(user)})
+            return jsonify({"user": _user_dto_with_session(user, db)})
+
+    @app.post("/api/me/avatar")
+    def upload_avatar():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            if "avatar" not in request.files:
+                raise ApiError("BAD_REQUEST", "No avatar file uploaded", 400)
+            
+            f = request.files["avatar"]
+            if not f.filename:
+                raise ApiError("BAD_REQUEST", "Empty filename", 400)
+            
+            suffix = Path(f.filename).suffix.lower()
+            if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+                raise ApiError("BAD_REQUEST", "Invalid image format", 400)
+            
+            avatar_dir = settings.upload_dir / "avatars"
+            avatar_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 生成唯一文件名
+            file_id = str(uuid.uuid4())
+            safe_name = f"{file_id}{suffix}"
+            dest_path = avatar_dir / safe_name
+            
+            f.save(str(dest_path))
+            
+            # 更新用户头像路径
+            # 存储相对路径，方便前端拼接或后端动态生成 URL
+            user.avatar_url = f"/api/avatars/{safe_name}"
+            db.commit()
+            
+            return jsonify({"ok": True, "avatar_url": user.avatar_url})
+
+    @app.get("/api/avatars/<path:filename>")
+    def serve_avatar(filename: str):
+        avatar_dir = settings.upload_dir / "avatars"
+        return send_from_directory(str(avatar_dir), filename)
 
     def _recent_learning_behaviors(db: Session, user_id: int, limit: int = 50):
         latest_subq = (
@@ -4935,19 +4994,25 @@ def _create_app() -> Flask:
                 raise ApiError("NOT_FOUND", "resource not found", 404)
             if res.delete_request_status != "pending":
                 raise ApiError("FORBIDDEN", "no pending delete request", 403)
+            
+            data = _json()
+            comment = (data.get("comment") or "").strip()
+            if not comment:
+                raise ApiError("BAD_REQUEST", "拒绝申请时必须填写审核意见", 400)
+
             teacher_id = res.delete_requested_by or res.created_by
             delete_title = res.title
             res.delete_requested_by = None
             res.delete_requested_at = None
             res.delete_request_comment = None
-            res.delete_request_status = None
+            res.delete_request_status = "rejected"
             res.delete_request_audited_by = user.id
             res.delete_request_audited_at = dt.datetime.now(dt.UTC)
-            res.delete_request_audit_comment = None
+            res.delete_request_audit_comment = comment
             db.add(Notification(
                 user_id=teacher_id,
                 title="资源删除申请审核结果",
-                content=f"您提交的资源《{delete_title}》删除申请已被拒绝。",
+                content=f"您提交的资源《{delete_title}》删除申请已被拒绝。审核意见：{comment}",
                 type="delete_request_result",
                 related_id=resource_id,
             ))
@@ -5004,6 +5069,9 @@ def _create_app() -> Flask:
         comment = (data.get("comment") or "").strip() or None
         if status not in {"approved", "rejected"}:
             raise ApiError("BAD_REQUEST", "status must be approved/rejected", 400)
+        
+        if status == "rejected" and not comment:
+            raise ApiError("BAD_REQUEST", "拒绝审核时必须填写审核意见", 400)
 
         with SessionLocal() as db:
             user = require_auth(db)
@@ -5700,6 +5768,7 @@ def _create_app() -> Flask:
             "username": u.username,
             "roles": [r.name for r in u.roles],
             "phone": u.phone,
+            "avatar_url": u.avatar_url,
             "created_at": u.created_at.isoformat() if u.created_at else None,
         }
         roles = {r.name for r in u.roles}
@@ -5707,18 +5776,26 @@ def _create_app() -> Flask:
             s = db.execute(select(Student).where(Student.user_id == u.id)).scalar_one_or_none()
             if s:
                 data["student_id"] = s.student_id
+                data["email"] = s.email
+                data["name"] = s.name
         if "teacher" in roles:
             t = db.execute(select(Teacher).where(Teacher.user_id == u.id)).scalar_one_or_none()
             if t:
                 data["teacher_id"] = t.teacher_id
+                data["email"] = t.email
+                data["name"] = t.name
         if "dean" in roles:
             d = db.execute(select(Dean).where(Dean.user_id == u.id)).scalar_one_or_none()
             if d:
                 data["dean_id"] = d.dean_id
+                data["email"] = d.email
+                data["name"] = d.name
         if "admin" in roles:
             a = db.execute(select(Admin).where(Admin.user_id == u.id)).scalar_one_or_none()
             if a:
                 data["admin_id"] = a.admin_id
+                data["email"] = a.email
+                data["name"] = a.name
         data["pages"] = [p["path"] for p in _role_pages(db, u)]
         return data
 
@@ -5727,6 +5804,8 @@ def _create_app() -> Flask:
             "id": u.id,
             "username": u.username,
             "roles": [r.name for r in u.roles],
+            "phone": u.phone,
+            "avatar_url": u.avatar_url,
             "is_active": bool(u.is_active),
             "created_at": u.created_at.isoformat() if u.created_at else None,
         }
@@ -5736,18 +5815,26 @@ def _create_app() -> Flask:
             if s:
                 data["student_id"] = s.student_id
                 data["class_name"] = s.class_name
+                data["email"] = s.email
+                data["name"] = s.name
         if "teacher" in roles:
             t = db.execute(select(Teacher).where(Teacher.user_id == u.id)).scalar_one_or_none()
             if t:
                 data["teacher_id"] = t.teacher_id
+                data["email"] = t.email
+                data["name"] = t.name
         if "dean" in roles:
             d = db.execute(select(Dean).where(Dean.user_id == u.id)).scalar_one_or_none()
             if d:
                 data["dean_id"] = d.dean_id
+                data["email"] = d.email
+                data["name"] = d.name
         if "admin" in roles:
             a = db.execute(select(Admin).where(Admin.user_id == u.id)).scalar_one_or_none()
             if a:
                 data["admin_id"] = a.admin_id
+                data["email"] = a.email
+                data["name"] = a.name
         data["pages"] = [p["path"] for p in _role_pages(db, u)]
         return data
 
@@ -6227,6 +6314,94 @@ def _create_app() -> Flask:
                     mimetype="application/zip"
                 )
 
+    @app.post("/api/admin/restore")
+    def restore():
+        with SessionLocal() as db:
+            user = require_auth(db)
+            require_roles(user, {"admin"})
+            
+            if "file" not in request.files:
+                raise ApiError("BAD_REQUEST", "No file uploaded", 400)
+            
+            f = request.files["file"]
+            if not f.filename or not f.filename.endswith(".zip"):
+                raise ApiError("BAD_REQUEST", "Invalid file format, must be .zip", 400)
+            
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                zip_path = tmp_path / "restore.zip"
+                f.save(str(zip_path))
+                
+                with zipfile.ZipFile(zip_path, "r") as zipf:
+                    zipf.extractall(tmpdir)
+                
+                # 开始执行恢复
+                try:
+                    from sqlalchemy import text
+                    
+                    # 关闭外键检查
+                    if "sqlite" in settings.database_url:
+                        db.execute(text("PRAGMA foreign_keys = OFF"))
+                    else:
+                        db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+                    
+                    # 获取数据库所有表以确保安全
+                    inspector = inspect(engine)
+                    allowed_tables = set(inspector.get_table_names())
+                    
+                    restore_count = 0
+                    for json_file in tmp_path.glob("*.json"):
+                        table_name = json_file.stem
+                        if table_name not in allowed_tables:
+                            print(f"[!] Warning: Table {table_name} in backup not found in current database, skipping.")
+                            continue
+                        
+                        with json_file.open("r", encoding="utf-8") as jf:
+                            data = json.load(jf)
+                        
+                        # 清空当前表
+                        db.execute(text(f"DELETE FROM {table_name}"))
+                        
+                        # 插入新数据
+                        if data:
+                            # 预处理数据（还原日期和字节）
+                            processed_data = []
+                            for row in data:
+                                p_row = {}
+                                for k, v in row.items():
+                                    # 尝试还原日期（简单启发式判断）
+                                    if isinstance(v, str) and (len(v) == 10 or len(v) >= 19) and (v[4] == "-" and v[7] == "-"):
+                                        try:
+                                            p_row[k] = dt.datetime.fromisoformat(v)
+                                        except:
+                                            p_row[k] = v
+                                    # 尝试还原字节（由于备份时转为了 hex，且通常 id 等不是 hex，这里需要根据字段类型更精确，
+                                    # 但作为通用恢复，先尝试根据备份逻辑判断）
+                                    # 备份逻辑：item[k] = v.hex() if isinstance(v, bytes)
+                                    # 这里比较难 100% 确定是否是 hex 还是普通字符串，除非检查 schema
+                                    else:
+                                        p_row[k] = v
+                                processed_data.append(p_row)
+                            
+                            # 执行批量插入
+                            db.execute(insert(text(table_name)), processed_data)
+                            restore_count += 1
+                    
+                    db.commit()
+                    
+                    # 重新开启外键检查
+                    if "sqlite" in settings.database_url:
+                        db.execute(text("PRAGMA foreign_keys = ON"))
+                    else:
+                        db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+                        
+                    return jsonify({"ok": True, "message": f"Successfully restored {restore_count} tables."})
+                
+                except Exception as e:
+                    db.rollback()
+                    traceback.print_exc()
+                    return jsonify({"error": f"Restore failed: {str(e)}"}), 500
+
     @app.get("/api/admin/configs")
     def get_configs():
         with SessionLocal() as db:
@@ -6341,11 +6516,10 @@ def _seed_rbac(db: Session) -> None:
     }
     for role_name, paths in default_role_pages.items():
         role = role_by_name.get(role_name)
-        if role:
-            # 确保角色拥有预设的所有页面，而不仅仅是初始化时
-            existing_paths = {p.path for p in role.pages}
+        if role and not role.pages:
+            # 仅在角色没有任何关联页面时进行初始化映射，避免覆盖管理员的后续修改
             for p_path in paths:
-                if p_path in page_by_path and p_path not in existing_paths:
+                if p_path in page_by_path:
                     role.pages.append(page_by_path[p_path])
     db.commit()
 
@@ -6384,7 +6558,13 @@ def _split_names(raw: str) -> List[str]:
 
 
 def _user_dto(u: User) -> Dict[str, Any]:
-    data: Dict[str, Any] = {"id": u.id, "username": u.username, "roles": [r.name for r in u.roles], "phone": u.phone}
+    data: Dict[str, Any] = {
+        "id": u.id, 
+        "username": u.username, 
+        "roles": [r.name for r in u.roles], 
+        "phone": u.phone,
+        "avatar_url": u.avatar_url
+    }
     if SESSION_LOCAL is None:
         return data
     roles = set(data["roles"])
@@ -6393,14 +6573,26 @@ def _user_dto(u: User) -> Dict[str, Any]:
             s = db.execute(select(Student).where(Student.user_id == u.id)).scalar_one_or_none()
             if s:
                 data["student_id"] = s.student_id
+                data["email"] = s.email
+                data["name"] = s.name
         if "teacher" in roles:
             t = db.execute(select(Teacher).where(Teacher.user_id == u.id)).scalar_one_or_none()
             if t:
                 data["teacher_id"] = t.teacher_id
+                data["email"] = t.email
+                data["name"] = t.name
         if "dean" in roles:
             d = db.execute(select(Dean).where(Dean.user_id == u.id)).scalar_one_or_none()
             if d:
                 data["dean_id"] = d.dean_id
+                data["email"] = d.email
+                data["name"] = d.name
+        if "admin" in roles:
+            a = db.execute(select(Admin).where(Admin.user_id == u.id)).scalar_one_or_none()
+            if a:
+                data["admin_id"] = a.admin_id
+                data["email"] = a.email
+                data["name"] = a.name
     return data
 
 
@@ -7930,23 +8122,31 @@ def _trigger_smart_push(db: Session, user_id: int, neo4j_driver):
     if not recommendations:
         return
     
-    top_pick = recommendations[0]
-    res_obj = top_pick["resource"]
-    reason = top_pick["reasons"][0] if top_pick["reasons"] else "根据你的学习进度推荐"
-    
-    # 检查是否已经推送过该资源的通知，避免重复骚扰
-    exists = db.execute(
+    # 检查是否在过去 1 小时内已经发送过推荐通知，避免频繁骚扰
+    # 同时也确保个人中心只推送一条关于“新推荐”的总通知，而不是每个资源一条
+    one_hour_ago = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
+    recent_notification = db.execute(
         select(Notification)
         .where(Notification.user_id == user_id)
-        .where(Notification.related_id == res_obj["id"])
         .where(Notification.type == "smart_push")
+        .where(Notification.created_at >= one_hour_ago)
     ).first()
     
-    if not exists:
+    if not recent_notification:
+        count = len(recommendations)
+        top_pick = recommendations[0]
+        res_obj = top_pick["resource"]
+        
+        title = "📚 发现：为您生成了新的学习推荐"
+        if count > 1:
+            content = f"系统根据您最近的学习行为，在知识图谱中为您发现了 {count} 份关联资源，包括《{res_obj['title']}》等，快去个人中心看看吧。"
+        else:
+            content = f"系统根据您最近的学习行为，在知识图谱中为您发现了一份优质资源《{res_obj['title']}》，快去个人中心看看吧。"
+
         db.add(Notification(
             user_id=user_id,
-            title="✨ 智能发现：你可能感兴趣的资源",
-            content=f"系统基于知识图谱为你发现了一份优质资源《{res_obj['title']}》，{reason}。",
+            title=title,
+            content=content,
             type="smart_push",
             related_id=res_obj["id"]
         ))
